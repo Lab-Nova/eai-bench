@@ -104,7 +104,7 @@ category-weighted "Overall Acc" is carried as a labelled footnote only: it count
 categories we did not run as N/A and is not comparable across components. In the
 reference run the flat rate is 74.60% and the weighted figure 40.60%.
 
-`--num-threads` defaults to 32. Note that bfcl-eval's own default is **1** for an API
+`--num-threads` defaults to 256. Note that bfcl-eval's own default is **1** for an API
 handler — only OSS handlers get a concurrent default — so leaving it unset runs the whole
 subset serially. Sampling uses bfcl-eval's default temperature 0.001, which differs from
 the other two components (temperature 1.0 / top_p 0.95 from the model card); the value is

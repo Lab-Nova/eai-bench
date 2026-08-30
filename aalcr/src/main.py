@@ -59,11 +59,16 @@ def cmd_run(a):
         rd = ResultDir.start(RESULTS_BASE)
         rd.write_subset(items)
 
+    # 0 means "no bound": run the whole subset at once. Resolved against the subset
+    # rather than the remaining work so that a resume of 3 stragglers records the same
+    # concurrency as the run that produced the other 22.
+    concurrency = a.concurrency or max(1, len(items))
+
     incoming = {
         "component": COMPONENT, "mode": "single_turn",
         "endpoint": a.endpoint, "model": a.model,
         "temperature": a.temperature, "top_p": a.top_p,
-        "n_subset": len(items), "concurrency": a.concurrency,
+        "n_subset": len(items), "concurrency": concurrency,
         "max_tokens": a.max_tokens,
         "started_at": rd.config.get("started_at") or resultdir.now_stamp(),
     }
@@ -76,7 +81,7 @@ def cmd_run(a):
     print(f"results dir : {rd.path}\n"
           f"prompt chars: min={min(len(i['prompt']) for i in items)} "
           f"max={max(len(i['prompt']) for i in items)}\n"
-          f"{len(done_ids)} already done, {len(todo)} to run, concurrency={a.concurrency}",
+          f"{len(done_ids)} already done, {len(todo)} to run, concurrency={concurrency}",
           flush=True)
     if not todo:
         print("nothing to do; run `collect` once the grades are in.")
@@ -87,7 +92,7 @@ def cmd_run(a):
     sink = ep.jsonl_writer(rd.responses_path)
     try:
         asyncio.run(ep.drive(todo, lambda it: _run_one(client, it, a.max_tokens),
-                             a.concurrency, sink, label="id"))
+                             concurrency, sink, label="id"))
     finally:
         sink.close()
 
@@ -157,8 +162,8 @@ def main():
     r.add_argument("--data-dir", help=f"AA-LCR corpus location (default {DEFAULT_DATA_DIR})")
     r.add_argument("--n-subset", type=int, default=dataset.N_SUBSET)
     r.add_argument("--limit", type=int, help="only run the first N of the subset (smoke test)")
-    r.add_argument("--concurrency", type=int, default=8,
-                   help="kept low: each prompt is hundreds of thousands of tokens")
+    r.add_argument("--concurrency", type=int, default=0,
+                   help="in-flight items; 0 (the default) means the whole subset at once")
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)

@@ -48,9 +48,10 @@ BFCL_PIN = "bfcl-eval==2026.3.23"
 # Installed alongside the pin rather than reported as a broken environment, because
 # the venv is ours and the omission is upstream's.
 BFCL_EXTRA_DEPS = ["soundfile"]
-# The default is 1 for an API handler (only OSS handlers get the concurrent default),
-# which would run the whole subset serially.
-DEFAULT_CONCURRENCY = 32
+# Passed straight through to `bfcl generate --num-threads`. bfcl-eval's own default is
+# 1 for an API handler (only OSS handlers get the concurrent default), which would run
+# the whole subset serially.
+DEFAULT_CONCURRENCY = 256
 # bfcl-eval's own default. It is not the sampling used by the other two components,
 # which follow the model card's temperature 1.0 / top_p 0.95 -- recorded in config.json
 # so the difference is visible rather than assumed.

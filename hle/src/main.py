@@ -221,7 +221,10 @@ def main():
                       help="single-turn, no tools")
     r.add_argument("--n-subset", type=int, default=dataset.N_SUBSET)
     r.add_argument("--limit", type=int, help="only run the first N of the subset (smoke test)")
-    r.add_argument("--concurrency", type=int, default=64)
+    r.add_argument("--concurrency", type=int, default=256,
+                   help="in-flight items; most of an item's wall-clock is local tool "
+                        "execution, not endpoint time, so this runs well above the "
+                        "server's --max-running-requests")
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=int, default=0,

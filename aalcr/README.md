@@ -20,8 +20,10 @@ The dataset is public (Apache-2.0) and fetched into `aalcr/data/` on first run �
 plus a zip of extracted document text, about 17 MB, git-ignored. Point `--data-dir` at an
 existing copy to skip the download.
 
-`--concurrency` defaults to **8**, deliberately low: each prompt is hundreds of thousands
-of tokens, so a high concurrency here is a memory problem, not a throughput win.
+`--concurrency` defaults to **0**, which means the whole subset at once — 25 items with
+the default `--n-subset`. Each prompt is hundreds of thousands of tokens, so the server's
+prefill queue, not this flag, is what actually paces the run; set a positive value to
+bound it. The resolved number (not the sentinel) is what lands in `config.json`.
 `--max-tokens` defaults to 24,576, which is generous — the documents are enormous but the
 answer is a figure or a sentence.
 

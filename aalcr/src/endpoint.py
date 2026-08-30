@@ -11,6 +11,7 @@ top_p 0.95. Reasoning effort is never sent, so the chat template's default appli
 
 import asyncio
 import json
+import random
 import time
 
 DEFAULT_TEMPERATURE = 1.0
@@ -19,6 +20,8 @@ DEFAULT_TOP_P = 0.95
 # per-request ceiling is deliberately generous. Retries are handled by the caller,
 # never by the SDK, so that every attempt is visible in the log.
 DEFAULT_TIMEOUT_S = 7200.0
+# Seconds to wait between retry attempts, drawn uniformly from this range.
+RETRY_WAIT_S = (1.0, 2.0)
 
 
 class Endpoint:
@@ -101,12 +104,16 @@ async def drive(items, work, concurrency, sink, label="item"):
     await asyncio.gather(*(one(it) for it in items))
 
 
-async def attempt(fn, attempts=3, base_delay=5):
+async def attempt(fn, attempts=3):
     """Call async `fn()` up to `attempts` times, returning (result, error_string).
 
     Transport hiccups are common on a long run and must not be recorded as a wrong
     answer -- that is exactly the bug this replaces, where an APIConnectionError row
     counted as a completed item and was never retried.
+
+    The wait between attempts is a short random one (see RETRY_WAIT_S). It is jittered
+    rather than fixed because at these concurrencies a hiccup tends to hit many requests
+    at once, and an identical backoff would march them all back at the server together.
     """
     err = None
     for i in range(attempts):
@@ -115,7 +122,7 @@ async def attempt(fn, attempts=3, base_delay=5):
         except Exception as e:  # noqa: BLE001 - recorded on the row, not raised
             err = f"{type(e).__name__}: {e}"
             if i + 1 < attempts:
-                await asyncio.sleep(base_delay * (i + 1))
+                await asyncio.sleep(random.uniform(*RETRY_WAIT_S))
     return None, err
 
 

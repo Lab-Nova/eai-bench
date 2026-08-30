@@ -1,0 +1,13 @@
+# Benchmark artifacts: large, per-run, and reproducible by re-running.
+*/results/
+
+# Datasets are fetched, not vendored.
+aalcr/data/
+hle/data/
+
+# The bfcl-eval virtualenv (~5.5 GB).
+bfcl/.venv/
+
+__pycache__/
+*.pyc
+.DS_Store

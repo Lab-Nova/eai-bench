@@ -36,6 +36,7 @@ exec /share/bin/gpu-run 0,1,2,3,4,5,6,7 -- python3 -m sglang.launch_server \
   --speculative-num-draft-tokens 6 \
   --max-running-requests 128 \
   --cuda-graph-max-bs-decode 128 \
+  --max-queued-requests 320 \
   --mem-fraction-static 0.921 \
   --chunked-prefill-size 32768 \
   --max-prefill-tokens 32768 \

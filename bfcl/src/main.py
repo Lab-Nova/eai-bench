@@ -40,6 +40,14 @@ DEFAULT_VENV = os.path.join(CLIENT_ROOT, ".venv")
 # command warns that "pypi versions are in development, please rely on the commit hash
 # for reproducibility", so `collect` records the installed version alongside the score.
 BFCL_PIN = "bfcl-eval==2026.3.23"
+# bfcl-eval 2026.3.23 does not declare these, but importing anything from
+# bfcl_eval.constants.model_config pulls the whole handler registry, and the Qwen
+# handler reaches qwen_agent -> qwen_agent.utils.utils -> `import soundfile`. Without
+# it a clean install cannot even register a model:
+#     ModuleNotFoundError: No module named 'soundfile'
+# Installed alongside the pin rather than reported as a broken environment, because
+# the venv is ours and the omission is upstream's.
+BFCL_EXTRA_DEPS = ["soundfile"]
 # The default is 1 for an API handler (only OSS handlers get the concurrent default),
 # which would run the whole subset serially.
 DEFAULT_CONCURRENCY = 32
@@ -66,7 +74,7 @@ def ensure_venv(venv, quiet=False):
     subprocess.run([py, "-m", "pip", "install", "--upgrade", "pip"],
                    check=True, capture_output=quiet)
     print(f"installing {BFCL_PIN} (this pulls a few GB)", flush=True)
-    subprocess.run([py, "-m", "pip", "install", BFCL_PIN], check=True)
+    subprocess.run([py, "-m", "pip", "install", BFCL_PIN, *BFCL_EXTRA_DEPS], check=True)
     return py
 
 

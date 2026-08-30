@@ -22,6 +22,13 @@ python3 bfcl/src/main.py status  --results-dir bfcl/results/<ts>
 interpreter automatically. Re-running `run` against an existing `--results-dir` resumes:
 `bfcl generate` skips ids already present in its result files.
 
+`setup` installs `soundfile` alongside the pin. `bfcl-eval` 2026.3.23 does not declare it,
+but touching `bfcl_eval.constants.model_config` imports the entire handler registry, and
+the Qwen handler reaches `qwen_agent` -> `import soundfile`. Without it a clean install
+cannot register a model at all — `run` dies on `ModuleNotFoundError: No module named
+'soundfile'` before it sends a single request. If a future pin adds more undeclared
+imports, they belong in `BFCL_EXTRA_DEPS` next to this one.
+
 ## Five things that silently produce a wrong number
 
 Each of these was found by reconstruction, and each fails quietly rather than loudly.

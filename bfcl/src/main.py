@@ -18,6 +18,7 @@ two runs sharing a root silently blend into each other's numbers.
 """
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -219,17 +220,19 @@ def cmd_run(a):
 
 
 def cmd_collect(a):
-    reexec_in_venv(a.venv)
+    if not a.no_evaluate:
+        reexec_in_venv(a.venv)
     rd = ResultDir.open(a.results_dir)
     cfg = rd.config
     registry = cfg.get("registry_name") or shim.registry_name(cfg["model"])
     project_root = os.path.join(rd.path, "bfcl_root")
     os.environ["BFCL_PROJECT_ROOT"] = project_root
 
-    # --partial-eval is required: evaluate raises outright when the number of result
-    # rows differs from the number of prompt entries, which is always true of a subset.
-    shim.run_cli(["evaluate", "--model", registry, "--test-category", "all",
-                  "--partial-eval"], project_root, cfg["model"], registry)
+    if not a.no_evaluate:
+        # --partial-eval is required: evaluate raises outright when the number of result
+        # rows differs from the number of prompt entries, always true of a subset.
+        shim.run_cli(["evaluate", "--model", registry, "--test-category", "all",
+                      "--partial-eval"], project_root, cfg["model"], registry)
 
     breakdown, correct, total = {}, 0, 0
     for path in sorted(glob.glob(os.path.join(project_root, "score", registry, "**",
@@ -272,10 +275,11 @@ def cmd_collect(a):
     overall_csv = os.path.join(project_root, "score", "data_overall.csv")
     if os.path.exists(overall_csv):
         with open(overall_csv, encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-        if len(lines) > 1:
+            rows = list(csv.DictReader(f))
+        if rows:
             score["native_weighted_overall"] = {
-                "header": lines[0], "row": lines[1],
+                "overall_acc": rows[0].get("Overall Acc"),
+                "latency_mean_s": rows[0].get("Latency Mean (s)"),
                 "note": "bfcl-eval's category-weighted leaderboard formula; counts "
                         "un-run categories as N/A, not comparable across components"}
 
@@ -343,8 +347,14 @@ def main():
                    help="resume even though endpoint/model changed (recorded in config.json)")
     r.set_defaults(fn=cmd_run)
 
-    for name, fn, help_ in (("collect", cmd_collect, "evaluate and write score.json"),
-                            ("pending", cmd_pending, "ids with no usable answer"),
+    s = sub.add_parser("collect", help="evaluate and write score.json")
+    s.add_argument("--results-dir", required=True)
+    s.add_argument("--no-evaluate", action="store_true",
+                   help="fold the score files already present instead of re-running "
+                        "bfcl evaluate; needs no venv")
+    s.set_defaults(fn=cmd_collect)
+
+    for name, fn, help_ in (("pending", cmd_pending, "ids with no usable answer"),
                             ("status", cmd_status, "run summary")):
         s = sub.add_parser(name, help=help_)
         s.add_argument("--results-dir", required=True)

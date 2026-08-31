@@ -3,6 +3,28 @@
 # memory (--hicache-ratio 2), L3 in a Mooncake store (8 x 192 GiB = 1.5 TiB).
 # Starts the Mooncake master, then the sglang server. The master stops with the server.
 #
+# Requests are placed by the central DP router (--load-balance-method central): the
+# controller holds one queue and hands a request to a rank only when that rank can admit
+# it immediately, so the per-rank waiting queues stay empty and placement is token-based
+# LPT over each rank's published KV budget. Two consequences are visible here:
+#
+#   - The L3 above is now load-bearing, not just a cache win. Late binding routes a
+#     request away from the rank that holds its prefix, so the prefix has to be reachable
+#     from every rank; the router refuses to start without --hicache-storage-backend, and
+#     write_through is what gets the prefix there in time.
+#   - The three --prefill-delayer flags are gone. The delayer re-aligns DP ranks that
+#     drifted apart because they queue independently; under this router they do not queue
+#     independently, and the router deliberately trades phase alignment for concurrency,
+#     so leaving the delayer on would fight it.
+#
+# --max-queued-requests is now a *global* bound rather than a per-rank one: 320 still
+# covers a client running at bfcl's concurrency of 256.
+#
+# Set SGLANG_FWD_TRACE_DIR to record the per-rank forward trace, which is what makes the
+# router's effect measurable -- how evenly the ranks are loaded, and how often they fall
+# out of phase. Put it on tmpfs (/dev/shm/fwdtrace): the writer drops records rather than
+# stalling the scheduler, so a slow filesystem costs records, not throughput.
+#
 # Environment:
 #   MOONCAKE_MASTER_ADDR         default 127.0.0.1:50051; a non-local address joins that
 #                                master instead of starting one
@@ -133,9 +155,7 @@ echo "[mooncake] RDMA $MOONCAKE_RDMA_DEV gid $MC_GID_INDEX, advertising $MOONCAK
   --tensor-parallel-size 8 \
   --data-parallel-size 8 \
   --enable-dp-attention \
-  --enable-prefill-delayer \
-  --prefill-delayer-max-delay-passes 205 \
-  --prefill-delayer-ignore-max-prefill-bs \
+  --load-balance-method central \
   --expert-parallel-size 8 \
   --moe-a2a-backend megamoe \
   --moe-runner-backend auto \

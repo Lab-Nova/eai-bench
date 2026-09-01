@@ -11,6 +11,7 @@ top_p 0.95. Reasoning effort is never sent, so the chat template's default appli
 
 import asyncio
 import json
+import os
 import random
 import time
 
@@ -20,14 +21,28 @@ DEFAULT_TOP_P = 0.95
 # per-request ceiling is deliberately generous. Retries are handled by the caller,
 # never by the SDK, so that every attempt is visible in the log.
 DEFAULT_TIMEOUT_S = 7200.0
-# Seconds to wait between retry attempts, drawn uniformly from this range.
-RETRY_WAIT_S = (1.0, 2.0)
+# Seconds to wait between retry attempts, drawn uniformly from the range for that
+# attempt. The ladder escalates because the two failure modes have very different
+# durations: a packet-loss hiccup clears in a second, but a hosted gateway in front of
+# the servers can shed load for minutes at a time -- in this suite's own runs a single
+# ~3-minute window of HTTP 503 "backend temporarily unavailable" killed 24 in-flight
+# items at once while the sglang nodes behind it sat at zero queue depth. An HLE item may
+# have spent 25 minutes in its tool loop by the time that hits, so the ladder has to
+# outlast a gateway blip rather than a dropped packet. Total tolerance is ~8 minutes.
+RETRY_LADDER_S = ((1.0, 2.0), (6.0, 12.0), (30.0, 60.0), (120.0, 180.0), (240.0, 300.0))
+# Kept as the first rung's alias so anything importing the old name still works.
+RETRY_WAIT_S = RETRY_LADDER_S[0]
+DEFAULT_ATTEMPTS = len(RETRY_LADDER_S) + 1
+# A local server ignores the key, but a hosted endpoint does not: read it from the
+# environment so a key never has to be typed on the command line or land in
+# config.json, which is committed alongside the results.
+DEFAULT_API_KEY = os.environ.get("OPENAI_API_KEY") or "EMPTY"
 
 
 class Endpoint:
     """One OpenAI-compatible chat endpoint, with the run's sampling parameters bound."""
 
-    def __init__(self, base_url, model, api_key="EMPTY",
+    def __init__(self, base_url, model, api_key=None,
                  temperature=DEFAULT_TEMPERATURE, top_p=DEFAULT_TOP_P,
                  timeout=DEFAULT_TIMEOUT_S):
         self.base_url = base_url
@@ -39,7 +54,8 @@ class Endpoint:
         # should not need the openai SDK installed to grade a finished run.
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(
-            base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+            base_url=base_url, api_key=api_key or DEFAULT_API_KEY, timeout=timeout,
+            max_retries=0)
 
     def sampling(self):
         return {"temperature": self.temperature, "top_p": self.top_p}
@@ -104,16 +120,18 @@ async def drive(items, work, concurrency, sink, label="item"):
     await asyncio.gather(*(one(it) for it in items))
 
 
-async def attempt(fn, attempts=3):
+async def attempt(fn, attempts=DEFAULT_ATTEMPTS):
     """Call async `fn()` up to `attempts` times, returning (result, error_string).
 
     Transport hiccups are common on a long run and must not be recorded as a wrong
     answer -- that is exactly the bug this replaces, where an APIConnectionError row
     counted as a completed item and was never retried.
 
-    The wait between attempts is a short random one (see RETRY_WAIT_S). It is jittered
-    rather than fixed because at these concurrencies a hiccup tends to hit many requests
-    at once, and an identical backoff would march them all back at the server together.
+    The wait between attempts climbs the RETRY_LADDER_S rungs, so a one-second blip costs
+    a second and a multi-minute outage is still survivable. Each wait is jittered rather
+    than fixed because at these concurrencies a hiccup tends to hit many requests at once,
+    and an identical backoff would march them all back at the server together -- which
+    against a gateway that is shedding load is how a blip becomes an outage.
     """
     err = None
     for i in range(attempts):
@@ -122,8 +140,20 @@ async def attempt(fn, attempts=3):
         except Exception as e:  # noqa: BLE001 - recorded on the row, not raised
             err = f"{type(e).__name__}: {e}"
             if i + 1 < attempts:
-                await asyncio.sleep(random.uniform(*RETRY_WAIT_S))
+                rung = RETRY_LADDER_S[min(i, len(RETRY_LADDER_S) - 1)]
+                await asyncio.sleep(random.uniform(*rung))
     return None, err
+
+
+async def backoff(i):
+    """Sleep the i-th rung of RETRY_LADDER_S, jittered.
+
+    For callers that must run their own retry loop because only they can tell a fatal
+    failure from a retryable one -- a context overflow has to stop the loop, a gateway
+    503 has to be waited out.
+    """
+    rung = RETRY_LADDER_S[min(i, len(RETRY_LADDER_S) - 1)]
+    await asyncio.sleep(random.uniform(*rung))
 
 
 def timed_row(item, drop=("prompt",)):

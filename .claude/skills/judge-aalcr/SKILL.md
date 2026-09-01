@@ -29,8 +29,23 @@ yourself to "check" a verdict.
    A JSON array of ids with a usable response and no grade yet; empty means done. The
    ids look like `<document_set_id>#<question_id>`, so quote them in the shell.
 
-2. Spawn **one subagent per id**, in parallel, with the prompt below and `<ID>`
-   replaced. Nothing else.
+2. Grade as **one large parallel workflow** (the Workflow tool), fanning out **one
+   subagent per id** — every pending id at once, not in sequential batches — with the
+   prompt below and `<ID>` replaced. Nothing else.
+
+   **Every grader runs on Sonnet** (`model: 'sonnet'` on the `agent()` call), for the same
+   reason as in `judge-hle`: the rubric is mechanical equality-checking, the wave is one
+   agent per item, and the verdict must not depend on which model the parent session
+   happened to be running. Pin it explicitly rather than inheriting.
+
+   To keep the swarm's launch cheap, write the grader prompt to one file and give each
+   agent only its id plus the path — the agent reads the rubric itself, so isolation is
+   preserved and the id is the only thing that varies.
+
+   25 items is a single wave, so the loop `judge-hle` needs is usually overkill here — but
+   the same trick applies if you are grading alongside a still-running client: `pending`
+   only lists ids that already have a usable response, so the workflow can poll and fan
+   out again rather than waiting for the run to end.
 
 3. If a subagent fails, re-run `pending` and spawn fresh subagents for what is still
    listed rather than recording a verdict on its behalf.

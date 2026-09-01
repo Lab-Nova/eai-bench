@@ -79,18 +79,29 @@ async def _force_final(client, item, trace, messages, ctx_full):
             "content": "Stop using tools and give your final answer now, in the required "
                        "format, based on what you have already found.",
         }]
-        try:
-            r = await client.create(convo, tool_choice="none")
-            return r.choices[0].message.content or ""
-        except Exception as e:  # noqa: BLE001 - only overflow is recoverable here
-            if not _is_context_overflow(e):
-                raise
+        for i_try in range(ep.DEFAULT_ATTEMPTS):
+            try:
+                r = await client.create(convo, tool_choice="none")
+                return r.choices[0].message.content or ""
+            except Exception as e:  # noqa: BLE001 - only overflow is recoverable here
+                if _is_context_overflow(e):
+                    break
+                if i_try + 1 >= ep.DEFAULT_ATTEMPTS:
+                    raise
+                await ep.backoff(i_try)
     convo = [{"role": "user", "content":
               f"{item['prompt']}\n\n"
               f"You already investigated this with tools. Their output was:\n\n"
               f"{_digest(trace)}\n\n"
               f"Give your final answer now, in the required format."}]
-    r = await client.create(convo)
+    for i_try in range(ep.DEFAULT_ATTEMPTS):
+        try:
+            r = await client.create(convo)
+            break
+        except Exception:  # noqa: BLE001 - the rebuilt convo cannot overflow
+            if i_try + 1 >= ep.DEFAULT_ATTEMPTS:
+                raise
+            await ep.backoff(i_try)
     return r.choices[0].message.content or ""
 
 
@@ -111,13 +122,26 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0):
                 if remaining <= 0:
                     break
                 kwargs["max_tokens"] = remaining
-            try:
-                resp = await client.create(messages, **kwargs)
-            except Exception as e:  # noqa: BLE001
-                if _is_context_overflow(e):
-                    ctx_full = True
+            # This runs its own retry rather than ep.attempt() because only here can a
+            # context overflow -- which must stop the loop -- be told apart from a
+            # transport or gateway failure, which must be waited out. Before this the
+            # call had no retry at all, so one HTTP 503 from a hosted gateway discarded
+            # an item that had already spent twenty minutes in its tool loop; a single
+            # three-minute 503 window cost 24 items at once.
+            resp = None
+            for i_try in range(ep.DEFAULT_ATTEMPTS):
+                try:
+                    resp = await client.create(messages, **kwargs)
                     break
-                raise
+                except Exception as e:  # noqa: BLE001
+                    if _is_context_overflow(e):
+                        ctx_full = True
+                        break
+                    if i_try + 1 >= ep.DEFAULT_ATTEMPTS:
+                        raise
+                    await ep.backoff(i_try)
+            if resp is None:  # context overflow, or out of attempts
+                break
             rounds += 1
             if resp.usage:
                 spent += resp.usage.completion_tokens or 0

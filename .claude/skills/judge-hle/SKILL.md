@@ -30,9 +30,33 @@ to "check" a verdict, and do not summarize several items together.
    array means the run is fully graded — go to step 4. Re-running the skill is safe:
    already-graded items never come back.
 
-2. Spawn **one subagent per id**, in parallel. Give each one the prompt in
-   *The grader prompt* below with `<ID>` replaced. Nothing else — no context about the
-   run, the model, the other questions, or how the scoring is going.
+2. Grade the pending ids as **one large parallel workflow** — the Workflow tool, not
+   agents dispatched by hand from the main loop. The script fans out **one subagent per
+   id**, every pending id at once rather than in sequential batches, and each agent gets
+   the prompt in *The grader prompt* below with `<ID>` replaced. Nothing else — no
+   context about the run, the model, the other questions, or how the scoring is going.
+
+   A workflow rather than loose agents because the fan-out is the point: 250 graders is
+   a scale the main loop should not be babysitting one tool call at a time, and the
+   script keeps the poll/dispatch/retry loop deterministic instead of model-driven.
+
+   **Every grader runs on Sonnet** (`model: 'sonnet'` on the `agent()` call). This is not
+   a cost note dressed up as a rule: the rubric is mechanical equality-checking against a
+   gold string, a 250-item wave is 250 agents, and a grader that reasons its way to a
+   more generous verdict is a worse grader. Pin the model explicitly rather than
+   inheriting the caller's — the number must not move because the parent session
+   happened to be running something else.
+
+   To keep the swarm's launch cheap, write the grader prompt to one file and give each
+   agent only its id plus the path — the agent reads the rubric itself, so isolation is
+   preserved and the id is the only thing that varies.
+
+   Grading does not have to wait for generation to finish: `pending` only ever lists ids
+   that already have a usable response. So have the workflow **loop** — poll `pending`,
+   fan out a wave, poll again — until the client process has exited and `pending` comes
+   back empty. One workflow then drains the whole run alongside it, instead of one
+   invocation per wave. Bound the retries (three attempts per id) so a grader that keeps
+   failing to record cannot spin the loop forever.
 
 3. If a subagent fails or reports that it could not record, re-run `pending` and spawn
    fresh subagents for whatever is still listed. Do not record a verdict on a grader's

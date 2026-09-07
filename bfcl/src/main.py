@@ -17,11 +17,8 @@ bfcl-eval as BFCL_PROJECT_ROOT. That isolation is mandatory, not stylistic: `eva
 folds *every* score file it finds in its score directory into the leaderboard CSVs, so
 two runs sharing a root silently blend into each other's numbers.
 
-`run --benchmark` turns the suite into a fixed workload for timing an endpoint rather
-than scoring one: the same 490 tasks (the 500-task subset minus the ten in
-subset.LONG_TAIL), dispatched in the
-same order, at the same concurrency, every time. `latency` is the measurement that
-ranking came from and re-derives it from any set of finished runs.
+`run --benchmark` dispatches all 500 tasks in a fixed order at concurrency 256.
+Generation has a shared five-minute deadline; unfinished tasks become timeout rows.
 """
 
 import argparse
@@ -29,6 +26,8 @@ import csv
 import glob
 import json
 import os
+import multiprocessing
+import signal
 import statistics
 import subprocess
 import sys
@@ -69,6 +68,7 @@ DEFAULT_CONCURRENCY = 256
 # side is already sized for: serving/serve_glm5.3_dpep_conc128_hicache*.sh set
 # --max-queued-requests 320 specifically to cover a client at this concurrency.
 BENCHMARK_CONCURRENCY = 256
+BENCHMARK_TIMEOUT_S = 300
 # How many times `run` re-runs rows that came back holding an inference error. The same
 # in every mode, benchmark included: a dropped request is the gateway's problem, not a
 # different workload, and leaving it unanswered would put a wrong answer in the score
@@ -219,6 +219,66 @@ def write_id_file(project_root, grouped):
     return path
 
 
+def _generation_child(argv, project_root, model, registry):
+    os.setsid()
+    shim.run_cli(argv, project_root, model, registry)
+
+
+def run_generation_until(argv, project_root, model, registry, timeout_s):
+    """Stop the entire generation process group at the shared wall-clock deadline."""
+    process = multiprocessing.get_context("fork").Process(
+        target=_generation_child, args=(argv, project_root, model, registry))
+    process.start()
+    try:
+        process.join(max(0, timeout_s))
+        if not process.is_alive():
+            if process.exitcode:
+                raise RuntimeError(f"bfcl generate exited {process.exitcode}")
+            return True
+        return False
+    finally:
+        if process.is_alive():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                process.kill()
+            process.join()
+
+
+def mark_timeouts(project_root, registry, grouped):
+    """After generation stops, preserve complete rows and mark missing IDs timeout.
+
+    A killed writer can leave a partial last JSON line. Remove it before appending
+    terminal rows, so both collection and later inspection can read every result.
+    """
+    have = set()
+    paths = {}
+    for path in result_files(project_root, registry):
+        paths[category_of(path)] = path
+        valid = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                have.add(row["id"])
+                valid.append(row)
+        with open(path, "w", encoding="utf-8") as f:
+            for row in valid:
+                f.write(json.dumps(row) + "\n")
+    for cat, ids in grouped.items():
+        path = paths.get(cat) or os.path.join(
+            project_root, "result", registry, f"BFCL_v4_{cat}_result.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for task_id in ids:
+                if task_id not in have:
+                    f.write(json.dumps({"id": task_id, "status": "timeout",
+                        "result": "Error during inference: timeout (benchmark 300s deadline)",
+                        "timeout_s": BENCHMARK_TIMEOUT_S}) + "\n")
+
+
 # -- commands --------------------------------------------------------------------
 
 def cmd_setup(a):
@@ -246,6 +306,8 @@ def cmd_run(a):
     # Benchmark mode settles its terms here, before anything is written, so that a run
     # either is the fixed workload or refuses to start pretending to be it.
     if a.benchmark:
+        if a.target != subsetlib.TARGET:
+            raise SystemExit("--benchmark requires --target 500")
         if a.results_dir:
             raise SystemExit(
                 "--benchmark starts its own results directory and never resumes one.\n"
@@ -264,6 +326,9 @@ def cmd_run(a):
     max_attempts = (a.max_attempts if a.max_attempts is not None
                     else DEFAULT_MAX_ATTEMPTS)
 
+    if max_attempts < 1:
+        raise SystemExit("--max-attempts must be positive")
+
     if a.results_dir:
         rd = ResultDir.open(a.results_dir)
         items = rd.read_subset()
@@ -281,15 +346,6 @@ def cmd_run(a):
     excluded = []
     if items is None:
         items = subsetlib.flatten(subsetlib.build(a.target))
-        if a.benchmark:
-            items, excluded, absent = subsetlib.without_long_tail(items)
-            print(f"\nbenchmark: excluded {len(excluded)} long-tail task(s)")
-            for i in excluded:
-                print(f"  - {i}")
-            if absent:
-                # Only reachable with a --target that samples them away. Say so: a
-                # benchmark whose exclusion list half-applied is not the same workload.
-                print(f"  not in this subset, nothing excluded: {', '.join(absent)}")
         rd.write_subset(items, drop=())
     grouped = subsetlib.group(items)
 
@@ -322,6 +378,7 @@ def cmd_run(a):
                          "use the model card's temperature 1.0 / top_p 0.95",
         "benchmark": bool(a.benchmark),
         "long_tail_excluded": excluded,
+        "generation_timeout_s": BENCHMARK_TIMEOUT_S if a.benchmark else None,
         "dispatch_order_sha256": order_sha,
     }, force=a.force)
 
@@ -338,7 +395,14 @@ def cmd_run(a):
     for attempt in range(1, max_attempts + 1):
         attempts_used = attempt
         print(f"\n=== generate (attempt {attempt}/{max_attempts}) ===", flush=True)
-        shim.run_cli(gen_argv, project_root, cfg["model"], registry)
+        if a.benchmark:
+            remaining = BENCHMARK_TIMEOUT_S - (time.monotonic() - started)
+            if remaining <= 0 or not run_generation_until(
+                    gen_argv, project_root, cfg["model"], registry, remaining):
+                mark_timeouts(project_root, registry, grouped)
+                break
+        else:
+            shim.run_cli(gen_argv, project_root, cfg["model"], registry)
 
         _, failed = scan_results(project_root, registry)
         n_failed = sum(len(v) for v in failed.values())
@@ -368,6 +432,11 @@ def cmd_run(a):
     cfg = rd.config
     cfg.setdefault("generate_wall_s", []).append(round(wall, 1))
     cfg.setdefault("attempts_used", []).append(attempts_used)
+    cfg["timeout_ids"] = {
+        cat: [r["id"] for r in entries if r.get("status") == "timeout"]
+        for cat, entries in rows.items()
+        if any(r.get("status") == "timeout" for r in entries)
+    }
     cfg["finished_at"] = resultdir.now_stamp()
     rd.write_config(cfg)
 
@@ -375,10 +444,8 @@ def cmd_run(a):
     if a.benchmark:
         print_workload_summary(rd.path, wall, concurrency, attempts_used)
         if n_failed:
-            print(f"\nWARNING: {n_failed} request(s) still hold an inference error "
-                  f"after {attempts_used} attempt(s). The wall clock above is of a run "
-                  f"that never finished its workload, so it is not comparable with a "
-                  f"clean one. Re-run it rather than resuming.")
+            print(f"\n{n_failed} task(s) have inference errors or timeouts; "
+                  "these count as incorrect in the full subset denominator.")
     print(f"Next: python3 {__file__} collect --results-dir {rd.path}")
 
 
@@ -433,8 +500,13 @@ def cmd_collect(a):
         total += head["total_count"]
 
     n_subset = cfg.get("n_subset") or len(rd.read_subset())
-    _, failed = scan_results(project_root, registry)
+    rows, failed = scan_results(project_root, registry)
     n_failed = sum(len(v) for v in failed.values())
+    n_generated = sum(len(v) for v in rows.values())
+    timeout_ids = {cat: [r["id"] for r in entries if r.get("status") == "timeout"]
+                   for cat, entries in rows.items()
+                   if any(r.get("status") == "timeout" for r in entries)}
+    n_timeout = sum(map(len, timeout_ids.values()))
 
     score = {
         "component": COMPONENT,
@@ -443,7 +515,10 @@ def cmd_collect(a):
         "total": n_subset,
         "accuracy": round(correct / n_subset, 6) if n_subset else 0.0,
         "graded": total,
-        "responded": n_subset - n_failed,
+        "responded": n_generated - n_failed,
+        "timeout_ids": timeout_ids,
+        "timed_out": n_timeout,
+        "benchmark_complete": bool(cfg.get("benchmark")) and n_generated == n_subset and total == n_subset and n_failed == n_timeout,
         "complete": total == n_subset and n_failed == 0,
         "grader": "bfcl-eval:ast+state",
         "score_definition": "flat pass rate = correct / n_subset",
@@ -452,12 +527,10 @@ def cmd_collect(a):
         "results_dir": rd.path,
         "scored_at": resultdir.now_stamp(),
     }
-    # `benchmark` is what stops a reduced-subset timing run from being read as this
-    # endpoint's BFCL number: synthesis.py skips any score.json carrying it, and the
-    # excluded ids travel with it so the smaller denominator is never a mystery.
+    # Deadline-limited benchmark scores remain separate from uncapped accuracy.
     for k in ("endpoint", "model", "registry_name", "temperature", "imported",
               "mode", "benchmark", "long_tail_excluded", "dispatch_order_sha256",
-              "concurrency", "generate_wall_s"):
+              "concurrency", "generate_wall_s", "generation_timeout_s", "attempts_used"):
         if k in cfg:
             score[k] = cfg[k]
 
@@ -478,9 +551,8 @@ def cmd_collect(a):
     rd._write_json(rd.score_path, score)
     print(json.dumps({k: v for k, v in score.items() if k != "by_category"}, indent=2))
     if cfg.get("benchmark"):
-        print(f"\nbenchmark run: {len(cfg.get('long_tail_excluded') or [])} long-tail "
-              f"task(s) excluded, so this accuracy is over {n_subset} tasks and is not "
-              f"the BFCL-500 number. synthesis.py skips it.")
+        print(f"\nbenchmark run: {n_subset} tasks, {n_timeout} timeouts; "
+              "timeouts count as incorrect. synthesis.py skips benchmark scores.")
     print("\nby category:")
     for cat, b in sorted(breakdown.items()):
         print(f"  {cat:28s} {b['correct']:4d}/{b['total']:<4d} {b['accuracy']:.4f}")
@@ -621,10 +693,9 @@ def main():
                    help=f"how many times to retry rows holding an inference error "
                         f"(default {DEFAULT_MAX_ATTEMPTS}, every mode)")
     r.add_argument("--benchmark", action="store_true",
-                   help="fixed workload for timing an endpoint: the subset minus "
-                        f"subset.LONG_TAIL, one dispatch order, concurrency "
-                        f"{BENCHMARK_CONCURRENCY}, no resume. Scores a smaller "
-                        f"denominator, so synthesis.py ignores it.")
+                   help="500 tasks with a five-minute generation deadline, "
+                        f"one dispatch order, concurrency "
+                        f"{BENCHMARK_CONCURRENCY}, no resume; synthesis.py skips it.")
     r.add_argument("--force", action="store_true",
                    help="resume even though endpoint/model changed (recorded in config.json)")
     r.set_defaults(fn=cmd_run)

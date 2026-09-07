@@ -34,32 +34,26 @@ imports, they belong in `BFCL_EXTRA_DEPS` next to this one.
 
 ## Benchmark mode
 
-`run --benchmark` stops using the suite to score an endpoint and starts using it to time
-one. Three things are fixed, and each is refused rather than adjusted, because a knob
-you have to go and check is not a benchmark:
+`run --benchmark` runs the full deterministic **500-task subset**, in the recorded
+fixed dispatch order, at concurrency **256**, with a **300-second generation deadline**.
+The deadline starts before the first generation pass and covers imports, dispatch,
+all model calls, and any repair passes. Server startup and grading are outside it.
+`--target` other than 500, a different concurrency, and `--results-dir` are refused.
 
-1. **The tasks.** The 500-task subset minus the ten in `subset.LONG_TAIL` — 490 tasks.
-2. **The order.** Written to `dispatch_order.json` and fingerprinted into
-   `config.json` before the first request goes out, and each run compares its
-   fingerprint with the previous benchmark run's and says whether they match. The hash
-   is over the *ordered* id list, so one number pins both the tasks and their order —
-   two runs can be shown to have been the same workload rather than assumed to have been.
-3. **The concurrency.** 256, always. `--concurrency` anything else is an error.
+At the deadline the generation process group is stopped. Complete result rows are
+preserved; unfinished tasks receive `status: "timeout"` and an inference-error result.
+Timeouts are terminal for this run and count as incorrect in the **500-task denominator**.
+`score.json` reports `timed_out`, `timeout_ids`, and `responded` separately.
+`benchmark_complete` means every task was graded and either answered or timed out;
+`complete` still requires every task to have an answer without an inference error.
+No repair pass starts after the deadline. Before it, the usual maximum of three
+passes applies to inference errors. Ordinary BFCL mode has no new time cap.
 
-One thing follows from wanting the same workload every time: `--results-dir` is refused.
-A resume generates only the ids still missing from the result files, which is a smaller
-workload in a different order; a half-finished benchmark run is discarded, not continued.
-
-The repair pass is **not** one of the things benchmark mode turns off. A row holding
-`Error during inference` is a request the gateway dropped, not a shorter workload, and
-leaving it there would put a wrong answer in the score and a missing request in the
-timing — so `--max-attempts` is 3 in every mode, and the pass re-runs the same ids in
-the same relative order. It does cost wall clock, so a run that needed one says so, and
-two runs are comparable on wall clock only if both finished in a single pass.
-`config.json` records `attempts_used` alongside `generate_wall_s`.
-
-The run prints its wall clock, request-seconds, slot utilisation and latency
-percentiles.
+`config.json` records `generation_timeout_s`, `generate_wall_s`, `attempts_used`,
+and the workload fingerprint. Timeout cleanup can add a small scheduling overhead
+to the reported wall time. Client cancellation closes requests; a shared server may
+finish cancellation asynchronously. The baseline harness stops its dedicated server
+after collection.
 
 ### The order was already fixed; it was just never written down
 
@@ -75,71 +69,16 @@ Two consequences worth knowing:
 * A **resumed** run has a different, shorter queue: `collect_test_cases` drops ids
   already present in the result files. Same tasks, different workload. Hence the refusal.
 
-### The long tail, and how it was found
+### Historical exclusion-based runs
 
-`main.py latency` ranks every task by the per-request latency bfcl-eval already records
-in its result rows — summed over every turn and step, because one task holds one worker
-thread from its first request to its last. It reads finished runs off disk, so it needs
-no endpoint and no venv, and it aggregates across runs on purpose: in a single run the
-ranking is as much a picture of the endpoint's bad minutes as of the suite. One task
-here moved from 5 s to 1088 s between two runs.
+Earlier benchmark revisions excluded five tasks (495 total), then ten (490 total).
+Those policies have been replaced by the full 500-task, five-minute deadline above.
+Their saved fingerprints, timings, and denominators remain historical results and
+must not be compared as identical workloads. The old `LONG_TAIL` list is retained
+only as reference for latency analysis; benchmark mode no longer applies it.
 
-Over eight runs, against a subset median of ~6 s:
-
-```
-      med      min      max  runs fail  steps  out_tok  task
-    662.3    602.9   2215.5     3    3     16    72505  multi_turn_miss_func_147
-    499.1    211.0    818.6     5    2     11    22930  multi_turn_long_context_171
-    478.8      5.5   1087.9     6    0      1    18494  simple_java_74
-    324.2    118.4   1466.4     6    0     11    25854  multi_turn_base_171
-    321.5    150.2   1093.3     7    0     14    44909  multi_turn_miss_param_171
-    283.1     54.5    681.4     6    0     15    10930  multi_turn_miss_func_66
-```
-
-That top five is about a fifth of all request-seconds. Three of them are one scenario,
-index 171, which the suite repeats once per multi_turn category: a three-turn
-travel-booking-and-messaging session, 10-15 model calls. `simple_java_74` is the odd one
-— a single-turn question about serialising an XML surrogate pair on which the model runs
-away to tens of thousands of output tokens instead of emitting the one call it is asked
-for.
-
-The `fail` column is why `multi_turn_miss_func_147` is on the list. A failed row carries
-no latency and drops out of the median, which quietly flatters exactly the tasks slow
-enough to hit a gateway timeout: the worst task in the suite is missing from half the
-runs for that reason, and a ranking that reads only completed rows discounts the task
-most worth removing.
-
-It is a shoulder, not a cliff — the sixth is at 283 s. `latency` prints a DRIFT warning
-when the measured top `len(LONG_TAIL)` stops matching `LONG_TAIL`, and stops there: editing the list
-changes the workload, so it is a deliberate edit to `subset.py`, never something a
-measurement command does on its own.
-
-### Five additional exclusions from the September 7 baseline
-
-Run `2026-09-07T07-05-08Z-bench` finished its first 490 of 495 tasks in 3m39s,
-then spent another 23 minutes on these last five tasks:
-
-| Task | Summed request latency |
-| --- | ---: |
-| `multi_turn_long_context_82` | 1576.5 s |
-| `multi_turn_long_context_66` | 784.3 s |
-| `live_irrelevance_68-2-56` | 608.2 s |
-| `multi_turn_miss_func_66` | 372.8 s |
-| `multi_turn_miss_func_5` | 262.1 s |
-
-They are now excluded **in addition to** the original five. Benchmark mode runs
-490 tasks; ordinary BFCL mode still runs the full 500-task subset. This is a new
-workload with a new dispatch-order fingerprint. Historical 495-task results are
-preserved and must not be compared as if they measured the same workload. The
-existing concurrency, dispatch ordering, and repair-pass rules are unchanged.
-
-### It is not this endpoint's BFCL score
-
-490 tasks is a different denominator, and the ten excluded tasks were selected for
-long latency rather than randomly, so the resulting pass rate can be biased. The
-run records `benchmark: true` and `long_tail_excluded` in both `config.json` and
-`score.json`, `collect` says so in as many words, and `synthesis.py` skips any run
-carrying the flag when it looks for the latest BFCL number.
+Benchmark scores carry `benchmark: true` and are excluded from `synthesis.py`:
+a deadline-limited score is separate from an uncapped accuracy run.
 
 ## Five things that silently produce a wrong number
 

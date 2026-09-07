@@ -4,9 +4,8 @@ Artificial Analysis does not publish which 500 of the ~4.4k BFCL v4 tasks it use
 we take our own: proportional to each category's share of the suite, and picked by an
 even stride over the sorted id list -- no RNG, no seed, reproducible.
 
-`LONG_TAIL` and `dispatch_order` below are what `run --benchmark` adds on top of that:
-the same tasks, minus the handful that dominate the wall clock, submitted in an order
-that is a pure function of the subset rather than of how fast the endpoint answered.
+`dispatch_order` pins benchmark submission order. `LONG_TAIL` is historical
+latency-analysis metadata; benchmark mode now runs all 500 tasks with a deadline.
 
 Imports of `bfcl_eval` are deferred into the functions, because importing that package
 creates directories under BFCL_PROJECT_ROOT as a side effect and the caller must be
@@ -19,12 +18,7 @@ from pathlib import Path
 
 TARGET = 500
 
-# Fixed benchmark-only exclusions. The original five came from the cross-run
-# latency analysis documented in bfcl/README.md. Five more were added from run
-# 2026-09-07T07-05-08Z-bench: the last five tasks kept a 495-task run going for
-# another 23 minutes after its first 490 tasks finished. Keep both sets excluded.
-# This deliberately changes benchmark mode to 490 tasks; normal mode stays at 500.
-# Every run records the excluded IDs and a fingerprint of the remaining order.
+# Historical exclusions, retained for the latency-analysis command only.
 LONG_TAIL = (
     "multi_turn_miss_func_147",
     "multi_turn_long_context_171",

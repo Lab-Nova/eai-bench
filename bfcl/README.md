@@ -16,6 +16,9 @@ python3 bfcl/src/main.py setup                                  # once: bfcl/.ve
 python3 bfcl/src/main.py run --endpoint http://127.0.0.1:30000/v1 --model GLM-5.3
 python3 bfcl/src/main.py collect --results-dir bfcl/results/<ts>
 python3 bfcl/src/main.py status  --results-dir bfcl/results/<ts>
+
+python3 bfcl/src/main.py run --endpoint … --model … --benchmark  # fixed timing workload
+python3 bfcl/src/main.py latency                                 # rank tasks by latency
 ```
 
 `--model` is the server's `--served-model-name`. `run` re-executes itself under the venv
@@ -28,6 +31,96 @@ the Qwen handler reaches `qwen_agent` -> `import soundfile`. Without it a clean 
 cannot register a model at all — `run` dies on `ModuleNotFoundError: No module named
 'soundfile'` before it sends a single request. If a future pin adds more undeclared
 imports, they belong in `BFCL_EXTRA_DEPS` next to this one.
+
+## Benchmark mode
+
+`run --benchmark` stops using the suite to score an endpoint and starts using it to time
+one. Three things are fixed, and each is refused rather than adjusted, because a knob
+you have to go and check is not a benchmark:
+
+1. **The tasks.** The 500-task subset minus the five in `subset.LONG_TAIL` — 495 tasks.
+2. **The order.** Written to `dispatch_order.json` and fingerprinted into
+   `config.json` before the first request goes out, and each run compares its
+   fingerprint with the previous benchmark run's and says whether they match. The hash
+   is over the *ordered* id list, so one number pins both the tasks and their order —
+   two runs can be shown to have been the same workload rather than assumed to have been.
+3. **The concurrency.** 256, always. `--concurrency` anything else is an error.
+
+One thing follows from wanting the same workload every time: `--results-dir` is refused.
+A resume generates only the ids still missing from the result files, which is a smaller
+workload in a different order; a half-finished benchmark run is discarded, not continued.
+
+The repair pass is **not** one of the things benchmark mode turns off. A row holding
+`Error during inference` is a request the gateway dropped, not a shorter workload, and
+leaving it there would put a wrong answer in the score and a missing request in the
+timing — so `--max-attempts` is 3 in every mode, and the pass re-runs the same ids in
+the same relative order. It does cost wall clock, so a run that needed one says so, and
+two runs are comparable on wall clock only if both finished in a single pass.
+`config.json` records `attempts_used` alongside `generate_wall_s`.
+
+The run prints its wall clock, request-seconds, slot utilisation and latency
+percentiles.
+
+### The order was already fixed; it was just never written down
+
+bfcl-eval sorts every test case by `(single-turn before multi-turn, category, index)`
+and both seeds and refills its thread pool from a heap of that key, so submission order
+never depended on timing. `subset.dispatch_order` recomputes it from the ids alone.
+Two consequences worth knowing:
+
+* Every multi_turn task sits in the last fifth of the queue. With 256 threads and 412
+  single-turn tasks ahead of them, the expensive ones start last, so the wall clock is
+  roughly `(single-turn wave) + (slowest multi-turn task)` — which is why removing five
+  tasks moves it as much as it does.
+* A **resumed** run has a different, shorter queue: `collect_test_cases` drops ids
+  already present in the result files. Same tasks, different workload. Hence the refusal.
+
+### The long tail, and how it was found
+
+`main.py latency` ranks every task by the per-request latency bfcl-eval already records
+in its result rows — summed over every turn and step, because one task holds one worker
+thread from its first request to its last. It reads finished runs off disk, so it needs
+no endpoint and no venv, and it aggregates across runs on purpose: in a single run the
+ranking is as much a picture of the endpoint's bad minutes as of the suite. One task
+here moved from 5 s to 1088 s between two runs.
+
+Over eight runs, against a subset median of ~6 s:
+
+```
+      med      min      max  runs fail  steps  out_tok  task
+    662.3    602.9   2215.5     3    3     16    72505  multi_turn_miss_func_147
+    499.1    211.0    818.6     5    2     11    22930  multi_turn_long_context_171
+    478.8      5.5   1087.9     6    0      1    18494  simple_java_74
+    324.2    118.4   1466.4     6    0     11    25854  multi_turn_base_171
+    321.5    150.2   1093.3     7    0     14    44909  multi_turn_miss_param_171
+    283.1     54.5    681.4     6    0     15    10930  multi_turn_miss_func_66
+```
+
+That top five is about a fifth of all request-seconds. Three of them are one scenario,
+index 171, which the suite repeats once per multi_turn category: a three-turn
+travel-booking-and-messaging session, 10-15 model calls. `simple_java_74` is the odd one
+— a single-turn question about serialising an XML surrogate pair on which the model runs
+away to tens of thousands of output tokens instead of emitting the one call it is asked
+for.
+
+The `fail` column is why `multi_turn_miss_func_147` is on the list. A failed row carries
+no latency and drops out of the median, which quietly flatters exactly the tasks slow
+enough to hit a gateway timeout: the worst task in the suite is missing from half the
+runs for that reason, and a ranking that reads only completed rows discounts the task
+most worth removing.
+
+It is a shoulder, not a cliff — the sixth is at 283 s. `latency` prints a DRIFT warning
+when the measured top five stops matching `LONG_TAIL`, and stops there: editing the list
+changes the workload, so it is a deliberate edit to `subset.py`, never something a
+measurement command does on its own.
+
+### It is not this endpoint's BFCL score
+
+495 tasks is a different denominator, and the five that go are not a random five —
+they are the hardest multi-turn sessions in the sample, so the pass rate drifts up. The
+run records `benchmark: true` and `long_tail_excluded` in both `config.json` and
+`score.json`, `collect` says so in as many words, and `synthesis.py` skips any run
+carrying the flag when it looks for the latest BFCL number.
 
 ## Five things that silently produce a wrong number
 
@@ -113,5 +206,5 @@ recorded in `config.json` so the difference is visible rather than assumed.
 ## Files
 
 `main.py` CLI and orchestration · `shim.py` in-process registration and `.env` ·
-`subset.py` the deterministic 500-task subset · `resultdir.py` results-directory
-contract (vendored).
+`subset.py` the deterministic 500-task subset, `LONG_TAIL` and the dispatch order ·
+`resultdir.py` results-directory contract (vendored).

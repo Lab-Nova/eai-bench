@@ -53,6 +53,12 @@ def latest_scored(client, mode=None):
         s = load_score(d)
         if s is None:
             continue
+        if s.get("benchmark"):
+            # A benchmark run is a timing workload, not a measurement of accuracy: it
+            # drops the slowest tasks, so its denominator is smaller and its number is
+            # not this endpoint's score. Picking one up as "the latest run" is exactly
+            # the silent wrong number this script exists to refuse.
+            continue
         if mode is not None and s.get("mode") != mode:
             continue
         return d
@@ -105,6 +111,12 @@ def main():
     if dirs["hle"] is None:
         dirs["hle"] = latest_scored("hle")
     scores = {c: (load_score(d) if d else None) for c, d in dirs.items()}
+    for c, sc in scores.items():
+        # Auto-selection skips these; an explicit --bfcl DIR can still name one.
+        if sc and sc.get("benchmark"):
+            print(f"WARNING: the {c} run given is a benchmark run -- "
+                  f"{sc.get('total')} tasks with the long tail excluded, not the "
+                  f"component's subset. Its accuracy does not belong in the index.")
     ref_dir = a.hle_no_tools or latest_scored("hle", mode="no_tools")
     ref = load_score(ref_dir) if ref_dir else None
     if ref is not None and dirs["hle"] == ref_dir:

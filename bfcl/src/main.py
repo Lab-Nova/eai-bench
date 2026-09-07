@@ -2,10 +2,11 @@
 """BFCL v4 benchmark client (500-task subset).
 
     setup   [--venv DIR]                       create the bfcl-eval virtualenv
-    run     --endpoint URL --model NAME [--results-dir DIR]
+    run     --endpoint URL --model NAME [--results-dir DIR] [--benchmark]
     collect --results-dir DIR                  bfcl evaluate -> score.json
     pending --results-dir DIR                  ids that still have no usable answer
     status  --results-dir DIR                  counts, per category
+    latency [--results-dir DIR ...]            rank the subset by measured latency
 
 BFCL is the odd component: it wraps the third-party `bfcl-eval` package instead of
 talking to the endpoint directly, and it is machine-graded (AST + state), so there is
@@ -15,6 +16,12 @@ Everything for one run lives under <results-dir>/bfcl_root, which is passed to
 bfcl-eval as BFCL_PROJECT_ROOT. That isolation is mandatory, not stylistic: `evaluate`
 folds *every* score file it finds in its score directory into the leaderboard CSVs, so
 two runs sharing a root silently blend into each other's numbers.
+
+`run --benchmark` turns the suite into a fixed workload for timing an endpoint rather
+than scoring one: the same 495 tasks (the 500-task subset minus the five in
+subset.LONG_TAIL, which alone are a fifth of a run's request-seconds), dispatched in the
+same order, at the same concurrency, every time. `latency` is the measurement that
+ranking came from and re-derives it from any set of finished runs.
 """
 
 import argparse
@@ -22,8 +29,10 @@ import csv
 import glob
 import json
 import os
+import statistics
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -52,6 +61,20 @@ BFCL_EXTRA_DEPS = ["soundfile"]
 # 1 for an API handler (only OSS handlers get the concurrent default), which would run
 # the whole subset serially.
 DEFAULT_CONCURRENCY = 256
+# Benchmark mode pins it instead of defaulting to it. Concurrency is the single biggest
+# lever on both wall clock and per-request latency, so a benchmark run measured at any
+# other value is not comparable with the rest -- and a run whose settings you have to go
+# and check is not a benchmark. It is refused rather than overridden, so a --concurrency
+# meant for a different run never passes silently. 256 is also the number the serving
+# side is already sized for: serving/serve_glm5.3_dpep_conc128_hicache*.sh set
+# --max-queued-requests 320 specifically to cover a client at this concurrency.
+BENCHMARK_CONCURRENCY = 256
+# How many times `run` re-runs rows that came back holding an inference error. The same
+# in every mode, benchmark included: a dropped request is the gateway's problem, not a
+# different workload, and leaving it unanswered would put a wrong answer in the score
+# and a missing request in the timing. The repair pass re-runs the same ids in the same
+# relative order, so what it restores is the workload rather than perturbing it.
+DEFAULT_MAX_ATTEMPTS = 3
 # bfcl-eval's own default. It is not the sampling used by the other two components,
 # which follow the model card's temperature 1.0 / top_p 0.95 -- recorded in config.json
 # so the difference is visible rather than assumed.
@@ -125,6 +148,56 @@ def is_failed(row):
     return not isinstance(result, (str, list, dict)) or result == ""
 
 
+def iter_rows(run_dir):
+    """(category, row) for every result row under a *results* directory.
+
+    Registry-agnostic on purpose: `latency` reads runs made against other endpoints and
+    under other model names, and the registry only ever appears as one directory level.
+    """
+    pat = os.path.join(run_dir, "bfcl_root", "result", "*", "**", RESULT_GLOB)
+    for path in sorted(glob.glob(pat, recursive=True)):
+        cat = category_of(path)
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    yield cat, json.loads(line)
+                except json.JSONDecodeError:
+                    # This reads other runs' files, including ones a killed process left
+                    # with a torn final line. Everything before it is intact, and a
+                    # latency ranking is not the place to die over one row.
+                    continue
+
+
+def _leaves(x):
+    if isinstance(x, (int, float)):
+        yield x
+    elif isinstance(x, list):
+        for y in x:
+            yield from _leaves(y)
+
+
+def row_latency(row):
+    """Seconds this task held a worker thread, summed over every turn and every step.
+
+    bfcl-eval records `latency` as a float for a single-turn task and as a list of lists
+    -- turn, then step within the turn -- for a multi-turn one. The sum is the right
+    number for both: one task occupies one thread from its first request to its last, so
+    the total is what the scheduler sees and what the wall clock is made of.
+    """
+    return sum(_leaves(row.get("latency")))
+
+
+def row_steps(row):
+    """How many model calls the task took. One for single-turn, 9-30 for multi-turn."""
+    return sum(1 for _ in _leaves(row.get("latency")))
+
+
+def row_output_tokens(row):
+    return sum(_leaves(row.get("output_token_count")))
+
+
 def scan_results(project_root, registry):
     """-> (rows_by_category, failed_by_category)."""
     rows, failed = {}, {}
@@ -153,8 +226,43 @@ def cmd_setup(a):
     print(f"\nready: {py}")
 
 
+def previous_benchmark(exclude_path=None):
+    """(path, config) of the most recent earlier benchmark run, or (None, None)."""
+    if not os.path.isdir(RESULTS_BASE):
+        return None, None
+    for name in sorted(os.listdir(RESULTS_BASE), reverse=True):
+        path = os.path.join(RESULTS_BASE, name)
+        if path == exclude_path or not os.path.isdir(path):
+            continue
+        cfg = ResultDir(path).config
+        if cfg.get("benchmark"):
+            return path, cfg
+    return None, None
+
+
 def cmd_run(a):
     reexec_in_venv(a.venv)
+
+    # Benchmark mode settles its terms here, before anything is written, so that a run
+    # either is the fixed workload or refuses to start pretending to be it.
+    if a.benchmark:
+        if a.results_dir:
+            raise SystemExit(
+                "--benchmark starts its own results directory and never resumes one.\n"
+                "A resume generates only the ids still missing from the result files, "
+                "which is a smaller workload in a different order -- the two things "
+                "benchmark mode exists to hold fixed. Drop --results-dir; a half-"
+                "finished benchmark run is discarded, not continued.")
+        if a.concurrency not in (None, BENCHMARK_CONCURRENCY):
+            raise SystemExit(
+                f"--benchmark runs at concurrency {BENCHMARK_CONCURRENCY}, and "
+                f"--concurrency {a.concurrency} would make this run incomparable with "
+                f"every other benchmark run. Drop the flag, or drop --benchmark.")
+        concurrency = BENCHMARK_CONCURRENCY
+    else:
+        concurrency = a.concurrency if a.concurrency is not None else DEFAULT_CONCURRENCY
+    max_attempts = (a.max_attempts if a.max_attempts is not None
+                    else DEFAULT_MAX_ATTEMPTS)
 
     if a.results_dir:
         rd = ResultDir.open(a.results_dir)
@@ -162,7 +270,7 @@ def cmd_run(a):
         if not items:
             raise SystemExit(f"{rd.path} has no subset.json -- it is not a run directory")
     else:
-        rd = ResultDir.start(RESULTS_BASE)
+        rd = ResultDir.start(RESULTS_BASE, suffix="bench" if a.benchmark else None)
         items = None  # built below, once BFCL_PROJECT_ROOT is set
 
     project_root = os.path.join(rd.path, "bfcl_root")
@@ -170,10 +278,33 @@ def cmd_run(a):
     os.environ["BFCL_PROJECT_ROOT"] = project_root
     registry = shim.registry_name(a.model)
 
+    excluded = []
     if items is None:
         items = subsetlib.flatten(subsetlib.build(a.target))
+        if a.benchmark:
+            items, excluded, absent = subsetlib.without_long_tail(items)
+            print(f"\nbenchmark: excluded {len(excluded)} long-tail task(s)")
+            for i in excluded:
+                print(f"  - {i}")
+            if absent:
+                # Only reachable with a --target that samples them away. Say so: a
+                # benchmark whose exclusion list half-applied is not the same workload.
+                print(f"  not in this subset, nothing excluded: {', '.join(absent)}")
         rd.write_subset(items, drop=())
     grouped = subsetlib.group(items)
+
+    # The order bfcl-eval will actually dispatch in -- a pure function of the subset, so
+    # it can be written down before a single request is sent and compared afterwards.
+    order = subsetlib.dispatch_order(items)
+    order_sha = subsetlib.order_fingerprint(order)
+    if a.benchmark:
+        rd._write_json(os.path.join(rd.path, "dispatch_order.json"), order)
+        prev_path, prev_cfg = previous_benchmark(rd.path)
+        if prev_cfg:
+            prev_sha = prev_cfg.get("dispatch_order_sha256")
+            verdict = "identical to" if prev_sha == order_sha else "DIFFERENT from"
+            print(f"workload {verdict} the previous benchmark run "
+                  f"{os.path.basename(prev_path)} ({prev_sha} -> {order_sha})")
 
     # Always regenerate the id file from subset.json: the repair pass narrows it, so it
     # is a scratch file and must never be treated as the source of truth.
@@ -181,14 +312,17 @@ def cmd_run(a):
     shim.write_env(project_root, a.endpoint, a.api_key)
 
     cfg = rd.reconcile({
-        "component": COMPONENT, "mode": "native_fc",
+        "component": COMPONENT, "mode": "benchmark" if a.benchmark else "native_fc",
         "endpoint": a.endpoint, "model": a.model, "registry_name": registry,
         "temperature": a.temperature, "n_subset": len(items),
-        "concurrency": a.concurrency, "max_attempts": a.max_attempts,
+        "concurrency": concurrency, "max_attempts": max_attempts,
         "bfcl_pin": BFCL_PIN,
         "started_at": rd.config.get("started_at") or resultdir.now_stamp(),
         "sampling_note": "bfcl-eval's own default temperature; the other two components "
                          "use the model card's temperature 1.0 / top_p 0.95",
+        "benchmark": bool(a.benchmark),
+        "long_tail_excluded": excluded,
+        "dispatch_order_sha256": order_sha,
     }, force=a.force)
 
     gen_argv = ["generate",
@@ -197,11 +331,13 @@ def cmd_run(a):
                 # full ~4.4k suite. The flag's help text says it *adds* to
                 # --test-category; the code in fact replaces it.
                 "--run-ids",
-                "--num-threads", str(a.concurrency),
+                "--num-threads", str(concurrency),
                 "--temperature", str(a.temperature)]
 
-    for attempt in range(1, a.max_attempts + 1):
-        print(f"\n=== generate (attempt {attempt}/{a.max_attempts}) ===", flush=True)
+    started, attempts_used = time.monotonic(), 0
+    for attempt in range(1, max_attempts + 1):
+        attempts_used = attempt
+        print(f"\n=== generate (attempt {attempt}/{max_attempts}) ===", flush=True)
         shim.run_cli(gen_argv, project_root, cfg["model"], registry)
 
         _, failed = scan_results(project_root, registry)
@@ -211,21 +347,63 @@ def cmd_run(a):
             break
         print(f"{n_failed} row(s) hold an inference error; retrying just those",
               flush=True)
-        if attempt == a.max_attempts:
+        if attempt == max_attempts:
             break
         # --run-ids together with --allow-overwrite is the one combination that leaves
         # the existing result file in place while regenerating exactly the listed ids,
         # and the write is an id-keyed upsert, so no duplicates appear.
         write_id_file(project_root, failed)
         gen_argv = ["generate", "--model", registry, "--run-ids", "--allow-overwrite",
-                    "--num-threads", str(a.concurrency),
+                    "--num-threads", str(concurrency),
                     "--temperature", str(a.temperature)]
+    wall = time.monotonic() - started
 
     write_id_file(project_root, grouped)  # restore the canonical list
     rows, failed = scan_results(project_root, registry)
-    answered = sum(len(v) for v in rows.values()) - sum(len(v) for v in failed.values())
-    print(f"\n{answered}/{len(items)} tasks answered. Next: "
-          f"python3 {__file__} collect --results-dir {rd.path}")
+    n_failed = sum(len(v) for v in failed.values())
+    answered = sum(len(v) for v in rows.values()) - n_failed
+
+    # One entry per invocation rather than one number: a resumed run is several waves of
+    # requests and no single figure describes it. A benchmark run has exactly one.
+    cfg = rd.config
+    cfg.setdefault("generate_wall_s", []).append(round(wall, 1))
+    cfg.setdefault("attempts_used", []).append(attempts_used)
+    cfg["finished_at"] = resultdir.now_stamp()
+    rd.write_config(cfg)
+
+    print(f"\n{answered}/{len(items)} tasks answered in {wall:.0f}s")
+    if a.benchmark:
+        print_workload_summary(rd.path, wall, concurrency, attempts_used)
+        if n_failed:
+            print(f"\nWARNING: {n_failed} request(s) still hold an inference error "
+                  f"after {attempts_used} attempt(s). The wall clock above is of a run "
+                  f"that never finished its workload, so it is not comparable with a "
+                  f"clean one. Re-run it rather than resuming.")
+    print(f"Next: python3 {__file__} collect --results-dir {rd.path}")
+
+
+def print_workload_summary(run_dir, wall, concurrency, attempts_used=1):
+    """What a benchmark run is for: the timing, next to the workload that produced it."""
+    lat = sorted((row_latency(r), r["id"])
+                 for _, r in iter_rows(run_dir) if not is_failed(r))
+    if not lat:
+        return
+    vals = [x for x, _ in lat]
+    total, n = sum(vals), len(vals)
+    def q(p):
+        return vals[min(n - 1, int(p * n))]
+    print(f"\nworkload   : {n} tasks at concurrency {concurrency}")
+    util = f"{total / (wall * concurrency) * 100:.1f}%" if wall > 0 else "n/a"
+    print(f"wall clock : {wall:.0f}s   request-seconds {total:.0f}s   "
+          f"utilisation {util} of {concurrency} slots")
+    print(f"latency    : p50 {q(0.5):.1f}s  p90 {q(0.9):.1f}s  p99 {q(0.99):.1f}s  "
+          f"max {vals[-1]:.1f}s")
+    print("slowest    : " + ", ".join(f"{i} {v:.0f}s" for v, i in lat[-3:][::-1]))
+    if attempts_used > 1:
+        # The repair pass restores the workload, but its requests are inside the wall
+        # clock: two runs are comparable on wall clock only if both took one pass.
+        print(f"note       : took {attempts_used} generate passes -- the repair pass "
+              f"re-ran dropped requests, and its time is inside the wall clock above")
 
 
 def cmd_collect(a):
@@ -274,7 +452,12 @@ def cmd_collect(a):
         "results_dir": rd.path,
         "scored_at": resultdir.now_stamp(),
     }
-    for k in ("endpoint", "model", "registry_name", "temperature", "imported"):
+    # `benchmark` is what stops a 495-task timing run from being read as this
+    # endpoint's BFCL number: synthesis.py skips any score.json carrying it, and the
+    # excluded ids travel with it so the smaller denominator is never a mystery.
+    for k in ("endpoint", "model", "registry_name", "temperature", "imported",
+              "mode", "benchmark", "long_tail_excluded", "dispatch_order_sha256",
+              "concurrency", "generate_wall_s"):
         if k in cfg:
             score[k] = cfg[k]
 
@@ -294,6 +477,10 @@ def cmd_collect(a):
 
     rd._write_json(rd.score_path, score)
     print(json.dumps({k: v for k, v in score.items() if k != "by_category"}, indent=2))
+    if cfg.get("benchmark"):
+        print(f"\nbenchmark run: {len(cfg.get('long_tail_excluded') or [])} long-tail "
+              f"task(s) excluded, so this accuracy is over {n_subset} tasks and is not "
+              f"the BFCL-500 number. synthesis.py skips it.")
     print("\nby category:")
     for cat, b in sorted(breakdown.items()):
         print(f"  {cat:28s} {b['correct']:4d}/{b['total']:<4d} {b['accuracy']:.4f}")
@@ -320,11 +507,89 @@ def cmd_status(a):
     print(f"results dir : {rd.path}")
     print(f"endpoint    : {cfg.get('endpoint')}  model: {cfg.get('model')}")
     print(f"subset      : {len(items)} tasks in {len(subsetlib.group(items))} categories")
+    if cfg.get("benchmark"):
+        print(f"benchmark   : concurrency {cfg.get('concurrency')}  order "
+              f"{cfg.get('dispatch_order_sha256')}  wall "
+              f"{', '.join(f'{w:.0f}s' for w in cfg.get('generate_wall_s') or [])}")
+        print(f"  excluded  : {', '.join(cfg.get('long_tail_excluded') or []) or 'none'}")
     generated = sum(len(v) for v in rows.values())
     n_failed = sum(len(v) for v in failed.values())
     print(f"generated   : {generated}  failed rows: {n_failed}")
     for cat, ids in sorted(failed.items()):
         print(f"  {cat:28s} {len(ids)} failed")
+
+
+def cmd_latency(a):
+    """Rank the subset by measured per-request latency -- where LONG_TAIL comes from.
+
+    The measurement lives in the result rows bfcl-eval already writes, so this needs no
+    endpoint, no venv and no re-run: it re-derives the ranking from whatever finished
+    runs are on disk. Aggregating across runs is the point -- in a single run the
+    ranking is as much a picture of the endpoint's bad minutes as of the suite, and one
+    task here moved from 5 s to 1088 s between two runs.
+
+    `fail` is part of the ranking, not a footnote to it. A failed row carries no latency
+    and so drops out of the median, which quietly flatters exactly the tasks that are
+    slow enough to hit a gateway timeout: the worst task in this suite is missing from
+    half the runs for that reason, and would otherwise look like it appears rarely
+    rather than like it falls over.
+    """
+    dirs = a.results_dir or [os.path.join(RESULTS_BASE, n)
+                             for n in sorted(os.listdir(RESULTS_BASE))
+                             if os.path.isdir(os.path.join(RESULTS_BASE, n))]
+    per_id, used = {}, []
+    for d in dirs:
+        rows = list(iter_rows(d))
+        good = [(c, r) for c, r in rows if not is_failed(r)]
+        # Smoke runs of a couple of dozen tasks would otherwise contribute a median over
+        # a handful of categories and skew every id they happen to contain.
+        if len(good) < a.min_rows:
+            continue
+        used.append((d, len(good), len(rows) - len(good)))
+        for cat, r in rows:
+            e = per_id.setdefault(r["id"], {"cat": cat, "lat": [], "steps": [],
+                                            "out": [], "fail": 0})
+            if is_failed(r):
+                e["fail"] += 1
+                continue
+            e["lat"].append(row_latency(r))
+            e["steps"].append(row_steps(r))
+            e["out"].append(row_output_tokens(r))
+    if not used:
+        raise SystemExit(f"no run under {RESULTS_BASE} has {a.min_rows}+ usable rows "
+                         f"(pass --min-rows, or --results-dir)")
+
+    print(f"{len(used)} run(s), {len(per_id)} task(s):")
+    for d, n, nf in used:
+        print(f"  {os.path.basename(d):28s} {n:4d} rows"
+              + (f"  ({nf} failed)" if nf else ""))
+
+    ranked = sorted(((statistics.median(e["lat"]), min(e["lat"]), max(e["lat"]),
+                      statistics.median(e["steps"]), statistics.median(e["out"]),
+                      len(e["lat"]), e["fail"], i)
+                     for i, e in per_id.items() if len(e["lat"]) >= a.min_runs),
+                    reverse=True)
+    if not ranked:
+        raise SystemExit(f"no task appears in {a.min_runs}+ of those runs")
+    total = sum(r[0] for r in ranked)
+    cut = len(subsetlib.LONG_TAIL)
+
+    print(f"\nslowest {a.top}, by median total latency over the runs that answered them:")
+    print(f"  {'med':>8} {'min':>8} {'max':>8} {'runs':>5} {'fail':>4} {'steps':>6} "
+          f"{'out_tok':>8}  task")
+    for med, lo, hi, steps, out, n, nfail, i in ranked[:a.top]:
+        mark = " *" if i in subsetlib.LONG_TAIL else "  "
+        print(f"{mark}{med:8.1f} {lo:8.1f} {hi:8.1f} {n:5d} {nfail:4d} {steps:6.0f} "
+              f"{out:8.0f}  {i}")
+    print("\n* = in subset.LONG_TAIL, the set `run --benchmark` excludes.")
+    print(f"  the top {cut} are {sum(r[0] for r in ranked[:cut]) / total * 100:.1f}% of "
+          f"the {total:.0f} median request-seconds in a run.")
+    drift = [r[-1] for r in ranked[:cut] if r[-1] not in subsetlib.LONG_TAIL]
+    if drift:
+        print(f"  DRIFT: the measured top {cut} no longer matches LONG_TAIL. "
+              f"Not in it: {', '.join(drift)}.")
+        print("  Changing LONG_TAIL changes the workload, so it is a deliberate edit to "
+              "subset.py, not something this command does.")
 
 
 def cmd_refuse(a):
@@ -347,11 +612,19 @@ def main():
     r.add_argument("--model", required=True, help="the server's --served-model-name")
     r.add_argument("--results-dir", help="resume into this directory instead of creating one")
     r.add_argument("--target", type=int, default=subsetlib.TARGET)
-    r.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    r.add_argument("--concurrency", type=int, default=None,
+                   help=f"default {DEFAULT_CONCURRENCY}; fixed at "
+                        f"{BENCHMARK_CONCURRENCY} under --benchmark")
     r.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     r.add_argument("--api-key", default="EMPTY")
-    r.add_argument("--max-attempts", type=int, default=3,
-                   help="how many times to retry rows holding an inference error")
+    r.add_argument("--max-attempts", type=int, default=None,
+                   help=f"how many times to retry rows holding an inference error "
+                        f"(default {DEFAULT_MAX_ATTEMPTS}, every mode)")
+    r.add_argument("--benchmark", action="store_true",
+                   help="fixed workload for timing an endpoint: the subset minus "
+                        f"subset.LONG_TAIL, one dispatch order, concurrency "
+                        f"{BENCHMARK_CONCURRENCY}, no resume. Scores a smaller "
+                        f"denominator, so synthesis.py ignores it.")
     r.add_argument("--force", action="store_true",
                    help="resume even though endpoint/model changed (recorded in config.json)")
     r.set_defaults(fn=cmd_run)
@@ -368,6 +641,16 @@ def main():
         s = sub.add_parser(name, help=help_)
         s.add_argument("--results-dir", required=True)
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("latency", help="rank the subset by measured latency")
+    s.add_argument("--results-dir", nargs="*",
+                   help="runs to measure over (default: every run under results/)")
+    s.add_argument("--top", type=int, default=15)
+    s.add_argument("--min-rows", type=int, default=100,
+                   help="ignore runs with fewer usable rows than this (default 100)")
+    s.add_argument("--min-runs", type=int, default=3,
+                   help="ignore tasks measured in fewer runs than this (default 3)")
+    s.set_defaults(fn=cmd_latency)
 
     for name in ("show", "record"):
         s = sub.add_parser(name, help="not applicable: bfcl is machine-graded")

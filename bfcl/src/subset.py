@@ -19,41 +19,23 @@ from pathlib import Path
 
 TARGET = 500
 
-# The five tasks that dominate a run's wall clock, slowest first. Measured, not guessed:
-# `main.py latency` ranks every task by the per-request latency bfcl-eval records in its
-# result rows, summed over every turn and step, and takes the median across runs -- a
-# single run ranks the endpoint's bad minutes as much as the suite. These five head that
-# ranking at a median of 322-662 s each, against ~6 s for the subset as a whole, and are
-# about a fifth of all request-seconds in a run.
-#
-#   multi_turn_miss_func_147      662 s   16 calls,  72k output tokens
-#   multi_turn_long_context_171   499 s   11 calls,  23k
-#   simple_java_74                479 s    1 call,   18k
-#   multi_turn_base_171           324 s   11 calls,  26k
-#   multi_turn_miss_param_171     322 s   14 calls,  45k
-#
-# Three of them are one scenario, index 171, which the suite repeats once per multi_turn
-# category: a three-turn travel-booking-and-messaging session that takes 10-15 model
-# calls to finish. `simple_java_74` is the odd one -- a single-turn question about
-# serialising an XML surrogate pair, one call, on which the model runs away to tens of
-# thousands of output tokens instead of emitting the one function call it is asked for.
-# `multi_turn_miss_func_147` is the worst of all and the easiest to miss: it is slow
-# enough to hit gateway timeouts, so it failed outright in three of the six runs that
-# contain it, and a ranking that reads only completed rows discounts exactly the task
-# most worth removing. That is why `latency` prints a fail column.
-#
-# It is a shoulder, not a cliff -- multi_turn_miss_func_66 is at 283 s and _5 at 237 s.
-# Five is where the wall clock stops paying, not where the suite gets cheap.
-#
-# Dropping them changes the denominator. Every run that does it records the ids in
-# config.json and score.json, and a 495-task accuracy must never be compared with a
-# 500-task one.
+# Fixed benchmark-only exclusions. The original five came from the cross-run
+# latency analysis documented in bfcl/README.md. Five more were added from run
+# 2026-09-07T07-05-08Z-bench: the last five tasks kept a 495-task run going for
+# another 23 minutes after its first 490 tasks finished. Keep both sets excluded.
+# This deliberately changes benchmark mode to 490 tasks; normal mode stays at 500.
+# Every run records the excluded IDs and a fingerprint of the remaining order.
 LONG_TAIL = (
     "multi_turn_miss_func_147",
     "multi_turn_long_context_171",
     "simple_java_74",
     "multi_turn_base_171",
     "multi_turn_miss_param_171",
+    "multi_turn_long_context_82",
+    "multi_turn_long_context_66",
+    "live_irrelevance_68-2-56",
+    "multi_turn_miss_func_66",
+    "multi_turn_miss_func_5",
 )
 
 
@@ -118,8 +100,8 @@ def without_long_tail(items, ids=LONG_TAIL):
     """-> (kept, removed, absent).
 
     `absent` is the ids that were asked for and were not there: a subset built with a
-    non-default --target may not contain all five, and the run must say so rather than
-    quietly excluding four.
+    non-default --target may not contain all excluded IDs, and the run must say so rather than
+    quietly removing fewer tasks than requested.
     """
     ids = set(ids)
     kept = [it for it in items if it["id"] not in ids]

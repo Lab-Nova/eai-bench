@@ -38,7 +38,7 @@ imports, they belong in `BFCL_EXTRA_DEPS` next to this one.
 one. Three things are fixed, and each is refused rather than adjusted, because a knob
 you have to go and check is not a benchmark:
 
-1. **The tasks.** The 500-task subset minus the five in `subset.LONG_TAIL` — 495 tasks.
+1. **The tasks.** The 500-task subset minus the ten in `subset.LONG_TAIL` — 490 tasks.
 2. **The order.** Written to `dispatch_order.json` and fingerprinted into
    `config.json` before the first request goes out, and each run compares its
    fingerprint with the previous benchmark run's and says whether they match. The hash
@@ -110,14 +110,33 @@ runs for that reason, and a ranking that reads only completed rows discounts the
 most worth removing.
 
 It is a shoulder, not a cliff — the sixth is at 283 s. `latency` prints a DRIFT warning
-when the measured top five stops matching `LONG_TAIL`, and stops there: editing the list
+when the measured top `len(LONG_TAIL)` stops matching `LONG_TAIL`, and stops there: editing the list
 changes the workload, so it is a deliberate edit to `subset.py`, never something a
 measurement command does on its own.
 
+### Five additional exclusions from the September 7 baseline
+
+Run `2026-09-07T07-05-08Z-bench` finished its first 490 of 495 tasks in 3m39s,
+then spent another 23 minutes on these last five tasks:
+
+| Task | Summed request latency |
+| --- | ---: |
+| `multi_turn_long_context_82` | 1576.5 s |
+| `multi_turn_long_context_66` | 784.3 s |
+| `live_irrelevance_68-2-56` | 608.2 s |
+| `multi_turn_miss_func_66` | 372.8 s |
+| `multi_turn_miss_func_5` | 262.1 s |
+
+They are now excluded **in addition to** the original five. Benchmark mode runs
+490 tasks; ordinary BFCL mode still runs the full 500-task subset. This is a new
+workload with a new dispatch-order fingerprint. Historical 495-task results are
+preserved and must not be compared as if they measured the same workload. The
+existing concurrency, dispatch ordering, and repair-pass rules are unchanged.
+
 ### It is not this endpoint's BFCL score
 
-495 tasks is a different denominator, and the five that go are not a random five —
-they are the hardest multi-turn sessions in the sample, so the pass rate drifts up. The
+490 tasks is a different denominator, and the ten excluded tasks were selected for
+long latency rather than randomly, so the resulting pass rate can be biased. The
 run records `benchmark: true` and `long_tail_excluded` in both `config.json` and
 `score.json`, `collect` says so in as many words, and `synthesis.py` skips any run
 carrying the flag when it looks for the latest BFCL number.

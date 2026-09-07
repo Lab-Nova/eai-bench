@@ -18,8 +18,8 @@ folds *every* score file it finds in its score directory into the leaderboard CS
 two runs sharing a root silently blend into each other's numbers.
 
 `run --benchmark` turns the suite into a fixed workload for timing an endpoint rather
-than scoring one: the same 495 tasks (the 500-task subset minus the five in
-subset.LONG_TAIL, which alone are a fifth of a run's request-seconds), dispatched in the
+than scoring one: the same 490 tasks (the 500-task subset minus the ten in
+subset.LONG_TAIL), dispatched in the
 same order, at the same concurrency, every time. `latency` is the measurement that
 ranking came from and re-derives it from any set of finished runs.
 """
@@ -452,7 +452,7 @@ def cmd_collect(a):
         "results_dir": rd.path,
         "scored_at": resultdir.now_stamp(),
     }
-    # `benchmark` is what stops a 495-task timing run from being read as this
+    # `benchmark` is what stops a reduced-subset timing run from being read as this
     # endpoint's BFCL number: synthesis.py skips any score.json carrying it, and the
     # excluded ids travel with it so the smaller denominator is never a mystery.
     for k in ("endpoint", "model", "registry_name", "temperature", "imported",

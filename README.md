@@ -7,7 +7,7 @@ step that combines them into a single number.
 |---|---|---|---|
 | `bfcl/` | 500 tasks | machine (`bfcl-eval`, AST + state) | function / tool calling |
 | `hle/` | 250 questions | LLM judge | frontier reasoning (Humanity's Last Exam) |
-| `aalcr/` | 25 questions | LLM judge | long-context recall (AA-LCR) |
+| `aalcr/` | 100 questions | LLM judge (dataset's v1.1 prompts) | long-context reasoning (AA-LCR) |
 
 The index is the **equally-weighted mean of the three accuracies**. Each client is
 self-contained: it takes `--endpoint` and `--model`, writes one timestamped results
@@ -124,7 +124,7 @@ back unchanged:
 |---|---|
 | BFCL-500 | 373/500 = 74.60% |
 | HLE-250 with tools | 114/250 = 45.60% |
-| AA-LCR-25 | 20/25 = 80.00% |
+| AA-LCR-25 (legacy 25-question subset, v1.0 keys) | 20/25 = 80.00% |
 | **Composite** | **66.73 / 100** |
 | HLE-250 no tools (reference) | 89/250 = 35.60% |
 

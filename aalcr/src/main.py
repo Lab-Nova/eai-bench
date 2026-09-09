@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AA-LCR-25 benchmark client (long-context recall).
+"""AA-LCR benchmark client (long-context reasoning; all 100 questions by default).
 
     run     --endpoint URL --model NAME [--results-dir DIR] [--data-dir DIR]
     pending --results-dir DIR          ids with a response and no grade yet
@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,18 +32,68 @@ CLIENT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_BASE = os.path.join(CLIENT_ROOT, "results")
 DEFAULT_DATA_DIR = os.path.join(CLIENT_ROOT, "data")
 
-# Long-context answers are short: the documents are enormous but the reply is a figure
-# or a sentence. 24k leaves ample room for reasoning without inviting a runaway.
-DEFAULT_MAX_TOKENS = 24576
+# The reply is a figure or a sentence, but the model reasons over the whole corpus first,
+# and a fixed cap on that is a fixed cap on the score: under the 24,576-token cap this
+# client used to ship with, 9 of the first 300 answers across three endpoints were all
+# reasoning and no answer. The default is therefore "context": every request gets the
+# whole window the server exposes, max_tokens = context_len - prompt tokens.
+DEFAULT_MAX_TOKENS = "context"
+DEFAULT_CONTEXT_LEN = 1048576  # GLM-5.3 max_position_embeddings
+# Tokens left unrequested below the window. The server's refusal (below) counts the
+# prompt as it will actually be scheduled, so this only has to absorb rounding between
+# the check that refuses and the scheduler that clamps.
+CONTEXT_MARGIN = 16
+_INPUT_TOKENS_RE = re.compile(r"(\d+) tokens from the input messages")
 
 
-async def _run_one(client, item, max_tokens):
+def max_tokens_arg(s):
+    """`--max-tokens` value: an integer cap, or "context" for the whole window."""
+    return s if s == "context" else int(s)
+
+
+async def context_budget(client, prompt, context_len):
+    """The max_tokens that fills the context window for this prompt.
+
+    Only the server knows how many tokens the prompt is once its chat template is
+    applied, and it tells you when refusing an over-long request: an sglang server answers
+    max_tokens = the whole window with HTTP 400 "You requested a total of N tokens: X
+    tokens from the input messages ...". That X is the count the scheduler will use, so
+    the budget is exact. The probe is free -- it is refused at tokenization, before any
+    generation -- and it is streamed so that a server which does accept it can be cut
+    off at the first chunk instead of being left to generate a full answer.
+
+    A refusal that carries no count (a different server) falls back to a chars/2
+    estimate, which for this corpus overstates the prompt by 2x and so still leaves most
+    of the window.
+    """
+    from openai import BadRequestError
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        stream = await client.create(messages, max_tokens=context_len, stream=True)
+        async for _ in stream:
+            break
+        await stream.close()
+    except BadRequestError as e:
+        m = _INPUT_TOKENS_RE.search(str(e))
+        if m:
+            return context_len - int(m.group(1)) - CONTEXT_MARGIN
+    return context_len - len(prompt) // 2 - CONTEXT_MARGIN
+
+
+async def _run_one(client, item, max_tokens, context_len):
     row, t0 = ep.timed_row(item)
+    budget = max_tokens
+    if max_tokens == "context":
+        budget, err = await ep.attempt(
+            lambda: context_budget(client, item["prompt"], context_len))
+        if budget is None:
+            return ep.finish_row(row, t0, response="", reasoning_len=0, usage=None,
+                                 error=err, max_tokens=None)
     result, err = await ep.attempt(
-        lambda: client.complete(item["prompt"], max_tokens=max_tokens))
+        lambda: client.complete(item["prompt"], max_tokens=budget))
     content, reasoning_len, usage = result if result else ("", 0, None)
     return ep.finish_row(row, t0, response=content, reasoning_len=reasoning_len,
-                         usage=usage, error=err)
+                         usage=usage, error=err, max_tokens=budget)
 
 
 def cmd_run(a):
@@ -69,10 +120,21 @@ def cmd_run(a):
         "endpoint": a.endpoint, "model": a.model,
         "temperature": a.temperature, "top_p": a.top_p,
         "n_subset": len(items), "concurrency": concurrency,
-        "max_tokens": a.max_tokens,
+        "max_tokens": a.max_tokens, "context_len": a.context_len,
         "started_at": rd.config.get("started_at") or resultdir.now_stamp(),
     }
     cfg = rd.reconcile(incoming, force=a.force)
+    # max_tokens is not part of a run's identity: a resume may raise the cap, and the
+    # rows that finished under the old cap are exact samples under the new one, because
+    # a cap only ever truncates. It must still be on the record, so a change is logged
+    # to config_history the same way --force logs an identity change.
+    for key in ("max_tokens", "context_len"):
+        if cfg.get(key) != incoming[key]:
+            cfg.setdefault("config_history", []).append(
+                {"at": resultdir.now_stamp(),
+                 "changed": {key: {"from": cfg.get(key), "to": incoming[key]}}})
+            cfg[key] = incoming[key]
+            rd.write_config(cfg)
 
     done_ids, dropped = rd.prepare_resume()
     if dropped:
@@ -91,7 +153,8 @@ def cmd_run(a):
                          temperature=cfg["temperature"], top_p=cfg["top_p"])
     sink = ep.jsonl_writer(rd.responses_path)
     try:
-        asyncio.run(ep.drive(todo, lambda it: _run_one(client, it, a.max_tokens),
+        asyncio.run(ep.drive(todo,
+                             lambda it: _run_one(client, it, a.max_tokens, a.context_len),
                              concurrency, sink, label="id"))
     finally:
         sink.close()
@@ -166,7 +229,11 @@ def main():
                    help="in-flight items; 0 (the default) means the whole subset at once")
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
-    r.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    r.add_argument("--max-tokens", type=max_tokens_arg, default=DEFAULT_MAX_TOKENS,
+                   help='integer cap, or "context" (default): the whole window, '
+                        'context_len - prompt tokens, per request')
+    r.add_argument("--context-len", type=int, default=DEFAULT_CONTEXT_LEN,
+                   help='window size that "context" fills (default %(default)s, GLM-5.3)')
     r.add_argument("--force", action="store_true",
                    help="resume even though endpoint/model changed (recorded in config.json)")
     r.set_defaults(fn=cmd_run)

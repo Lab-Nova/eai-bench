@@ -42,10 +42,11 @@ yourself to "check" a verdict.
    agent only its id plus the path — the agent reads the rubric itself, so isolation is
    preserved and the id is the only thing that varies.
 
-   25 items is a single wave, so the loop `judge-hle` needs is usually overkill here — but
-   the same trick applies if you are grading alongside a still-running client: `pending`
-   only lists ids that already have a usable response, so the workflow can poll and fan
-   out again rather than waiting for the run to end.
+   The full 100 items fit in a single wave (16 graders run at a time, so it takes a few
+   minutes) — the loop `judge-hle` needs is usually overkill here. The same trick applies
+   if you are grading alongside a still-running client: `pending` only lists ids that
+   already have a usable response, so the workflow can poll and fan out again rather than
+   waiting for the run to end.
 
 3. If a subagent fails, re-run `pending` and spawn fresh subagents for what is still
    listed rather than recording a verdict on its behalf.
@@ -57,14 +58,33 @@ yourself to "check" a verdict.
    ```
 
    This writes `grades.jsonl` and `score.json`, including a per-document-category
-   breakdown — the subset deliberately spans all seven categories. It warns on stderr if
-   anything is ungraded; ungraded items count as incorrect.
+   breakdown across the seven document categories. It warns on stderr if anything is
+   ungraded; ungraded items count as incorrect.
+
+## Which rubric
+
+The grader prompt below carries the dataset's own **version 1.1 judge prompts verbatim**
+(dataset card, "Scoring Approach", September 2026). Artificial Analysis runs them on
+GPT-5.6 Luna at medium reasoning effort; here Sonnet stands in for that judge, and the
+prompts are not to be paraphrased, softened or extended. Two consequences worth knowing
+before you compare numbers:
+
+- The v1.1 rubric is **format-strict**: where the question asks for a particular format
+  (a percentage, a number of decimal places, a unit, a rounding, an ordering) the answer
+  must meet it. 41 of the 100 questions ask for one. An older, more lenient in-house
+  rubric ("ignore formatting…") gave a few points more; grades produced under it are not
+  comparable with these.
+- v1.1 also corrected 16 answer keys relative to v1.0.0, so scores against the two key
+  versions are not comparable either.
 
 ## The grader prompt
 
-> You are an equality checker for one question of the AA-LCR long-context benchmark.
-> You grade EXACTLY ONE item and you have no knowledge of any other item. Do not look
-> for others.
+> You are the equality checker for one question of the AA-LCR long-context benchmark,
+> running the dataset's own version 1.1 judge prompts
+> (https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR, "Scoring Approach"). You
+> grade EXACTLY ONE item and have no knowledge of any other item. Your item id is given
+> by the caller; write it in place of `<ID>` below (ids look like
+> `<document_set_id>#<question_id>`, keep the single quotes).
 >
 > **STEP 1 — fetch your item.** Run this exact command:
 >
@@ -72,31 +92,63 @@ yourself to "check" a verdict.
 > python3 $AALCR show --results-dir $DIR '<ID>'
 > ```
 >
-> It prints QUESTION, GOLD ANSWER and MODEL RESPONSE.
+> It prints QUESTION (= the question), GOLD ANSWER (= the OFFICIAL ANSWER) and MODEL
+> RESPONSE (= the CANDIDATE ANSWER). Read the whole response before deciding.
 >
-> **STEP 2 — decide correct / incorrect.** You are an equality checker, not a teacher.
-> The only question is whether the model's FINAL committed answer means the same thing
-> as the GOLD ANSWER.
+> **STEP 2 — apply the official judge instructions, verbatim below.**
 >
-> - Ignore formatting, markdown, bolding, currency symbols, thousands separators, units
->   spelled out vs abbreviated, and any surrounding explanation or derivation.
-> - A number written differently but equal in value is CORRECT (e.g. gold "0.1" vs
->   answer "10 percentage points"; gold "50%" vs answer "50").
-> - A sign or direction that contradicts the gold is INCORRECT.
-> - If the gold is a set or ranking, the same members in the order the question asked
->   for is CORRECT even if the gold lists them in a different order.
-> - If the model commits to an answer that is a superset or subset of the gold (extra or
->   missing items), that is INCORRECT.
-> - If the model states the gold value along the way but then commits to a different
->   final conclusion, that is INCORRECT. Grade what it committed to at the end.
-> - If the response is empty or never commits to an answer, that is INCORRECT.
-> - Do not give credit for being "close" or for good reasoning. Match or no match.
+> System prompt:
 >
-> Read the WHOLE response before deciding — these responses often reason for a long time
-> and reverse themselves near the end.
+> ```
+> Decide whether the CANDIDATE ANSWER is correct or incorrect against the OFFICIAL ANSWER.
+> Note the following points when assessing correctness:
 >
-> **STEP 3 — record your verdict.** Set CORRECT to 1 or 0 and write one sentence for
-> NOTE:
+> - Numbers should still match when they are the same value written differently, e.g., a
+>   percentage, a count of percentage points, and the equivalent decimal fraction are the same
+>   value: 0.675, "67.5%" and "67.5 percentage points" all match. So do different scales
+>   (thousand, million, bn) and different notations (thousands separators, currency symbols,
+>   LaTeX markup, and numbers written as words).
+> - Where the question asks for a particular format (e.g., a percentage, a number of decimal
+>   places, a unit, a rounding, or an ordering) the CANDIDATE ANSWER must meet it. If the
+>   question asks for no particular format, accept any equivalent form.
+> - In cases where the question asks for an ordered list, a title, honorific or article added
+>   to an entry in the CANDIDATE ANSWER can change where that entry sorts. Accept the ordering
+>   if it is correct either with those additions or without them.
+> - Grade the value the CANDIDATE ANSWER finally commits to, and it must commit to one. Values
+>   reached while working, and alternatives it considers and sets aside, do not count. If it
+>   offers several values without selecting one, it is incorrect even if one of them is right.
+>   Hedging is fine as long as one clearly definitive answer is given.
+> ```
+>
+> User prompt:
+>
+> ```
+> Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
+> For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
+>
+> The question, for reference only: START QUESTION {question}
+>
+> END QUESTION
+>
+> The OFFICIAL ANSWER: {official_answer}
+>
+> END OFFICIAL ANSWER
+>
+> BEGIN CANDIDATE ANSWER TO ASSESS
+>
+> {candidate_answer}
+>
+> END CANDIDATE ANSWER TO ASSESS
+>
+> Reply as JSON, with a verdict of CORRECT or INCORRECT.
+> ```
+>
+> An empty MODEL RESPONSE is INCORRECT. Nothing beyond these instructions applies: no
+> credit for being close or for good reasoning, and no penalty for extra explanation around
+> a committed answer that meets the OFFICIAL ANSWER and any format the question asks for.
+>
+> **STEP 3 — record your verdict.** CORRECT is 1, INCORRECT is 0; NOTE is one sentence
+> saying which rule decided it:
 >
 > ```
 > printf '%s' "NOTE" | python3 $AALCR record --results-dir $DIR '<ID>' CORRECT

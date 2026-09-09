@@ -1,12 +1,14 @@
-# AA-LCR-25
+# AA-LCR
 
-25 questions from [AA-LCR](https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR),
-a long-context recall benchmark: each prompt carries a full set of source documents and
-asks a question that can only be answered by reading them.
+All 100 questions of [AA-LCR](https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR),
+a long-context reasoning benchmark: each prompt carries a full set of source documents
+(240k-550k characters) and asks a question that can only be answered by reading them.
 
-Artificial Analysis does not publish which 25 of the 100 it uses, so this takes its own,
-without an RNG: sort by `(document_category, document_set_id, question_id)` and stride
-evenly. That spreads the sample across all seven document categories instead of
+The client fetches the dataset's `main` revision, which is **version 1.1** (September
+2026): 16 answer keys were corrected there and a judge system prompt was added, and the
+card says v1.1 scores are not comparable with v1.0.0 scores. `--n-subset N` runs a
+deterministic subset instead — sort by `(document_category, document_set_id, question_id)`
+and stride evenly, which spreads a sample across all seven document categories instead of
 clustering on the 63-question Company set. `collect` reports the per-category breakdown.
 
 ## Running
@@ -20,14 +22,19 @@ The dataset is public (Apache-2.0) and fetched into `aalcr/data/` on first run �
 plus a zip of extracted document text, about 17 MB, git-ignored. Point `--data-dir` at an
 existing copy to skip the download.
 
-`--concurrency` defaults to **0**, which means the whole subset at once — 25 items with
-the default `--n-subset`. Each prompt is hundreds of thousands of tokens, so the server's
+`--concurrency` defaults to **0**, which means the whole subset at once — all 100 items
+with the default `--n-subset`. Each prompt is hundreds of thousands of tokens, so the server's
 prefill queue, not this flag, is what actually paces the run; set a positive value to
 bound it. The resolved number (not the sentinel) is what lands in `config.json`.
-`--max-tokens` defaults to 24,576, which is generous — the documents are enormous but the
-answer is a figure or a sentence.
+`--max-tokens` defaults to `context`: each request asks for the whole window, `--context-len`
+(1,048,576) minus the prompt's tokens as the server itself counts them (it states the count when
+refusing a deliberately over-long probe, which costs nothing). The answer is a figure or a
+sentence, but the reasoning before it is not small — under the old fixed 24,576 cap 3% of
+answers were all reasoning and no answer. Pass an integer to cap it anyway.
 
-Then grade with the **judge-aalcr** skill, which ends by running `collect`.
+Then grade with the **judge-aalcr** skill, which ends by running `collect`. The skill
+carries the dataset's own v1.1 judge prompts verbatim (Artificial Analysis runs them on
+GPT-5.6 Luna at medium effort; the skill runs them on Sonnet, one isolated grader per item).
 
 ## Two things that will bite
 

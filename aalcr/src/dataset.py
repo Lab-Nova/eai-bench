@@ -1,20 +1,23 @@
-"""AA-LCR: fetching the dataset and assembling the 25-question subset.
+"""AA-LCR: fetching the dataset and assembling the question set.
 
 Prompt assembly and document ordering follow the dataset card verbatim
-(https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR).
+(https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR). The card's version 1.1
+(September 2026) corrected 16 answer keys and added a judge system prompt; scores on it
+are not comparable with version 1.0.0 scores. `ensure_data` fetches `main`, i.e. 1.1.
 
-AA's own 25-question subset is not published, so we take a deterministic, RNG-free 25
-of the 100: sort by (document_category, document_set_id, question_id) and stride evenly
-through that order, which spreads the sample across all seven document categories
+All 100 questions run by default. `--n-subset N` takes a deterministic, RNG-free N of
+them: sort by (document_category, document_set_id, question_id) and stride evenly
+through that order, which spreads a sample across all seven document categories
 instead of clustering on the 63-question Company set.
 """
 
 import csv
+import unicodedata
 import os
 import urllib.request
 import zipfile
 
-N_SUBSET = 25
+N_SUBSET = 100
 REPO = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main"
 FILES = ("AA-LCR_Dataset.csv", "AA-LCR_extracted-text.zip")
 
@@ -98,6 +101,11 @@ def _key(name):
     so exact matching against the CSV names fails. Comparing only the ASCII
     alphanumerics survives every such mangling.
     """
+    try:  # undo the zip's cp437 mojibake ("ΓÇÖ" is U+2019, "╠º" a combining cedilla) when a name carries it
+        name = name.encode("cp437").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    name = unicodedata.normalize("NFKD", name)  # "ş" -> "s" + combining mark, so the base letter survives on both sides
     return "".join(c for c in name if c.isascii() and c.isalnum()).lower()
 
 

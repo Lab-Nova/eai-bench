@@ -12,7 +12,7 @@ The index is the equally-weighted mean of three accuracies:
 
     BFCL v4 (500 tasks, machine-graded)
     HLE     (250 questions, LLM-judged)
-    AA-LCR  ( 25 questions, LLM-judged)
+    AA-LCR  (100 questions, LLM-judged)
 
 The BFCL subscore is a *flat* pass rate over the sampled tasks, not bfcl-eval's own
 category-weighted "Overall Acc" -- a flat rate is what "accuracy on 500 tasks" means
@@ -27,7 +27,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENTS = ("bfcl", "hle", "aalcr")
-LABELS = {"bfcl": "BFCL-500", "hle": "HLE-250", "aalcr": "AA-LCR-25"}
+LABELS = {"bfcl": "BFCL-500", "hle": "HLE-250", "aalcr": "AA-LCR-100"}
 
 
 def load_score(path):

@@ -1,6 +1,6 @@
 """Async OpenAI-compatible client and concurrency driver.
 
-This file is vendored byte-identically into `hle/src/` and `aalcr/src/`. Each benchmark
+This file is vendored byte-identically into every client that sends requests. Each benchmark
 client is meant to be copyable on its own, so the duplication is deliberate: there is no
 shared top-level package to install or keep in sync.
 
@@ -17,6 +17,11 @@ import time
 
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 0.95
+# Every request in every component asks for at most this many tokens, so all five
+# measure the endpoint under one generation budget. 128k is past the reasoning tail of
+# every component on GLM-5.3: the item that hits it is a runaway, not a long answer, and
+# `interaction_tokens` in score.json shows how close the distribution comes.
+DEFAULT_MAX_TOKENS = 131072
 # A single HLE item can legitimately run for hours across many tool rounds, so the
 # per-request ceiling is deliberately generous. Retries are handled by the caller,
 # never by the SDK, so that every attempt is visible in the log.

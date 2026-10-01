@@ -36,9 +36,9 @@ RESULTS_BASE = os.path.join(CLIENT_ROOT, "results")
 DEFAULT_DATA_DIR = os.path.join(CLIENT_ROOT, "data")
 
 # The answer is a 32-number list, but at 960k the model reasons for tens of thousands of
-# tokens first, so a cap is a cap on the score. As in aalcr, the default gives every
-# request the whole window: max_tokens = context_len - prompt tokens.
-DEFAULT_MAX_TOKENS = "context"
+# tokens first. The default is the suite-wide 131,072 (endpoint.DEFAULT_MAX_TOKENS);
+# "context" asks for the whole window, max_tokens = context_len - prompt tokens.
+DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 DEFAULT_CONTEXT_LEN = 1048576  # GLM-5.3 max_position_embeddings
 CONTEXT_MARGIN = 16
 _INPUT_TOKENS_RE = re.compile(r"(\d+) tokens from the input messages")
@@ -86,7 +86,8 @@ async def _run_one(client, item, max_tokens, context_len):
         lambda: client.complete(item["prompt"], max_tokens=budget))
     content, reasoning_len, usage = result if result else ("", 0, None)
     return ep.finish_row(row, t0, response=content, reasoning_len=reasoning_len,
-                         usage=usage, error=err, max_tokens=budget)
+                         usage=usage, interaction_tokens=resultdir.context_lengths([usage])[2],
+                         error=err, max_tokens=budget)
 
 
 def cmd_generate(a):
@@ -238,6 +239,10 @@ def collect(rd):
             f"{_mean(cells[(x, ln)]):6.3f}" if (x, ln) in cells else f"{'-':>6s}" for x in langs))
     print(f"{'mean':>8s} " + " ".join(f"{by_lang[x]:6.3f}" for x in langs)
           + f"   overall {score['accuracy']:.3f} +- {se:.3f}  ({responded}/{total} answered)")
+    if score.get("interaction_tokens_median") is not None:
+        print(f"interaction tokens (final context - prompt): "
+              f"median {score['interaction_tokens_median']:,.0f}  "
+              f"p90 {score['interaction_tokens_p90']:,}  max {score['interaction_tokens_max']:,}")
     if not score["complete"]:
         print(f"WARNING: {total - responded} item(s) have no answer and score 0; "
               f"resume with run --results-dir {rd.path}", file=sys.stderr)
@@ -273,8 +278,8 @@ def main():
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=max_tokens_arg, default=DEFAULT_MAX_TOKENS,
-                   help='integer cap, or "context" (default): the whole window, '
-                        'context_len - prompt tokens, per request')
+                   help='per-request cap (default %(default)s, the suite-wide budget), or '
+                        '"context": the whole window, context_len - prompt tokens')
     r.add_argument("--context-len", type=int, default=DEFAULT_CONTEXT_LEN,
                    help='window size that "context" fills (default %(default)s, GLM-5.3)')
     r.add_argument("--force", action="store_true",

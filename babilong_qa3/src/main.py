@@ -33,9 +33,10 @@ RESULTS_BASE = os.path.join(CLIENT_ROOT, "results")
 DEFAULT_DATA_DIR = os.path.join(CLIENT_ROOT, "data")
 
 # The answer is one sentence, but qa3 at 256k is reasoned over for ~40k tokens on average
-# and the tail runs past 131k: with a 131,072 cap, 3-8 of 100 items per endpoint were
-# truncated to no answer. As in aalcr, every request gets the whole window by default.
-DEFAULT_MAX_TOKENS = "context"
+# and the tail reaches the cap: at the suite-wide 131,072 (endpoint.DEFAULT_MAX_TOKENS),
+# 3-8 of 100 items per endpoint ran out of budget before answering. Those are counted in
+# score.json as `truncated`; "context" asks for the whole window instead.
+DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 DEFAULT_CONTEXT_LEN = 1048576  # GLM-5.3 max_position_embeddings
 CONTEXT_MARGIN = 16
 _INPUT_TOKENS_RE = re.compile(r"(\d+) tokens from the input messages")
@@ -104,7 +105,8 @@ async def _run_one(client, item, max_tokens, context_len):
     result, err = await ep.attempt(lambda: complete(client, item["prompt"], budget))
     content, reasoning_len, usage, finish = result if result else ("", 0, None, None)
     return ep.finish_row(row, t0, response=content, reasoning_len=reasoning_len,
-                         usage=usage, finish_reason=finish, error=err, max_tokens=budget)
+                         usage=usage, interaction_tokens=resultdir.context_lengths([usage])[2],
+                         finish_reason=finish, error=err, max_tokens=budget)
 
 
 def cmd_generate(a):
@@ -213,6 +215,10 @@ def collect(rd):
         print(f"{ln:>8s} {c['correct']:4d}/{c['total']:<4d} {100 * c['correct'] / c['total']:6.1f}%")
     print(f"{'all':>8s} {score['correct']:4d}/{score['total']:<4d} {100 * score['accuracy']:6.1f}%"
           f"   ({score['responded']} answered, {capped} hit max_tokens)")
+    if score.get("interaction_tokens_median") is not None:
+        print(f"interaction tokens (final context - prompt): "
+              f"median {score['interaction_tokens_median']:,.0f}  "
+              f"p90 {score['interaction_tokens_p90']:,}  max {score['interaction_tokens_max']:,}")
     if not score["complete"]:
         print(f"WARNING: {score['total'] - score['graded']} item(s) have no answer and count "
               f"as incorrect; resume with run --results-dir {rd.path}", file=sys.stderr)
@@ -246,8 +252,8 @@ def main():
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=max_tokens_arg, default=DEFAULT_MAX_TOKENS,
-                   help='integer cap, or "context" (default): the whole window, '
-                        'context_len - prompt tokens, per request')
+                   help='per-request cap (default %(default)s, the suite-wide budget), or '
+                        '"context": the whole window, context_len - prompt tokens')
     r.add_argument("--context-len", type=int, default=DEFAULT_CONTEXT_LEN,
                    help='window size that "context" fills (default %(default)s, GLM-5.3)')
     r.add_argument("--force", action="store_true",

@@ -28,10 +28,12 @@ accuracy per length. `show --results-dir DIR qa3-256k-7` prints one item.
 
 Settings:
 - `--concurrency` defaults to 50.
-- `--max-tokens` defaults to `context`, the whole window minus the prompt. qa3 at 256k
-  is reasoned over for about 40k tokens on average, and the tail runs past 131k. Under a
-  131,072 cap, 3 to 8 of 100 answers per endpoint were truncated to nothing.
-  `score.json` records `truncated`, the number of answers that hit `max_tokens`.
+- `--max-tokens` defaults to 131,072, the suite-wide per-request budget, which is also
+  the cap the reference numbers below were measured under. qa3 at 256k is reasoned over
+  for about 40k tokens on average, but the tail runs past 131k: 3 to 8 of 100 answers per
+  endpoint were truncated to nothing. `score.json` records `truncated`, the number of
+  answers that hit `max_tokens`, and the median `interaction_tokens` (final context −
+  prompt). `--max-tokens context` asks for the whole window minus the prompt instead.
 - Install `datasets`, `tokenizers`, `nltk`, `pandas`, `numpy` and `openai`. The last
   four are only needed for generation.
 

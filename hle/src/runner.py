@@ -1,9 +1,10 @@
 """Driving one HLE item to a final answer, in either mode.
 
-no-tools: one streamed completion under a generation budget.
+no-tools: one streamed completion, capped at max_tokens.
 tools:    an agentic loop -- the model calls `python` and `web_search` until it stops,
-          with no round cap and no max_tokens, so the only ceiling is the server's
-          context window or the model deciding it is done.
+          with no round cap; each request is capped at max_tokens, so the ceilings are
+          that per-request budget, the server's context window, and the model deciding
+          it is done.
 
 An item must never end without an answer merely because it ran long. If the context
 does fill, the loop falls back to a fresh short conversation carrying the question plus
@@ -15,11 +16,13 @@ import re
 
 import endpoint as ep
 import tools as hle_tools
+from resultdir import context_lengths
 
-# The no-tools pass caps generation; the with-tools pass does not send max_tokens at
-# all. In the original run a 65,536-token cap truncated 36 of 250 no-tools items into
-# empty answers, which is why the with-tools pass removed the cap entirely.
-DEFAULT_NOTOOLS_MAX_TOKENS = 65536
+# Both modes cap every request at the suite-wide 131,072. In the original run a
+# 65,536-token cap truncated 36 of 250 no-tools items into empty answers; the with-tools
+# pass then dropped the cap entirely, and now carries the same budget as every other
+# component instead.
+DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 
 _CTX_PAT = re.compile(
     r"context length|context window|longer than|maximum context|too long|"
@@ -66,13 +69,15 @@ def _digest(trace, limit=60000):
     return "".join(reversed(parts)) or "(no tool output was produced)"
 
 
-async def _force_final(client, item, trace, messages, ctx_full):
-    """Make the model commit to an answer.
+async def _force_final(client, item, trace, messages, ctx_full, max_tokens):
+    """Make the model commit to an answer. Returns (answer, usage, same_conversation).
 
     While the conversation still fits we just append the instruction to it. Once the
     context is full that is impossible, so we rebuild a short conversation carrying the
-    question plus a digest of the tool findings.
+    question plus a digest of the tool findings. A rebuilt conversation is a different
+    context, so its usage says nothing about how far the item's own context grew.
     """
+    cap = {"max_tokens": max_tokens} if max_tokens else {}
     if not ctx_full:
         convo = messages + [{
             "role": "user",
@@ -81,8 +86,8 @@ async def _force_final(client, item, trace, messages, ctx_full):
         }]
         for i_try in range(ep.DEFAULT_ATTEMPTS):
             try:
-                r = await client.create(convo, tool_choice="none")
-                return r.choices[0].message.content or ""
+                r = await client.create(convo, tool_choice="none", **cap)
+                return r.choices[0].message.content or "", _usage(r), True
             except Exception as e:  # noqa: BLE001 - only overflow is recoverable here
                 if _is_context_overflow(e):
                     break
@@ -96,19 +101,29 @@ async def _force_final(client, item, trace, messages, ctx_full):
               f"Give your final answer now, in the required format."}]
     for i_try in range(ep.DEFAULT_ATTEMPTS):
         try:
-            r = await client.create(convo)
+            r = await client.create(convo, **cap)
             break
         except Exception:  # noqa: BLE001 - the rebuilt convo cannot overflow
             if i_try + 1 >= ep.DEFAULT_ATTEMPTS:
                 raise
             await ep.backoff(i_try)
-    return r.choices[0].message.content or ""
+    return r.choices[0].message.content or "", _usage(r), False
 
 
-async def run_with_tools(client, item, max_rounds=0, gen_budget=0):
-    """The agentic loop. `max_rounds`/`gen_budget` of 0 mean no cap."""
+def _usage(resp):
+    return resp.usage.model_dump() if getattr(resp, "usage", None) else None
+
+
+async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
+                         max_tokens=DEFAULT_MAX_TOKENS):
+    """The agentic loop.
+
+    `max_tokens` caps each request; `gen_budget` caps completion tokens summed over the
+    whole loop; `max_rounds` caps tool rounds. 0 means no cap for any of them.
+    """
     row, t0 = ep.timed_row(item)
     messages = [{"role": "user", "content": item["prompt"]}]
+    usages = []  # one per request of this conversation, in order
     spent = rounds = ncalls = 0
     final, trace, err = "", [], None
     forced = ctx_full = False
@@ -117,11 +132,13 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0):
             if max_rounds and rounds >= max_rounds:
                 break
             kwargs = {"tools": hle_tools.TOOLS, "tool_choice": "auto"}
+            if max_tokens:
+                kwargs["max_tokens"] = max_tokens
             if gen_budget:
                 remaining = gen_budget - spent
                 if remaining <= 0:
                     break
-                kwargs["max_tokens"] = remaining
+                kwargs["max_tokens"] = min(remaining, max_tokens or remaining)
             # This runs its own retry rather than ep.attempt() because only here can a
             # context overflow -- which must stop the loop -- be told apart from a
             # transport or gateway failure, which must be waited out. Before this the
@@ -143,6 +160,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0):
             if resp is None:  # context overflow, or out of attempts
                 break
             rounds += 1
+            usages.append(_usage(resp))
             if resp.usage:
                 spent += resp.usage.completion_tokens or 0
             msg = resp.choices[0].message
@@ -157,20 +175,32 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0):
                               "args": tc.function.arguments[:2000], "result": out[:2000]})
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
         if not final:
-            final = await _force_final(client, item, trace, messages, ctx_full)
+            final, usage, same = await _force_final(client, item, trace, messages, ctx_full,
+                                                    max_tokens)
             forced = True
+            if same:
+                usages.append(usage)
+                spent += (usage or {}).get("completion_tokens") or 0
     except Exception as e:  # noqa: BLE001 - recorded on the row so resume retries it
         err = f"{type(e).__name__}: {e}"
+    # The final context is the last request of the item's own conversation: its prompt
+    # holds the question, every assistant turn and every tool result, so final - prompt
+    # is the context the item grew. (Reasoning is dropped between turns, see
+    # _assistant_msg, so only the last turn's reasoning is in it.)
+    prompt_tokens, final_ctx, interaction = context_lengths(usages)
     return ep.finish_row(row, t0, response=final, completion_tokens=spent, rounds=rounds,
                          tool_calls=ncalls, tool_trace=trace, forced_final=forced,
-                         context_full=ctx_full, error=err)
+                         context_full=ctx_full, prompt_tokens=prompt_tokens,
+                         final_context_tokens=final_ctx, interaction_tokens=interaction,
+                         error=err)
 
 
-async def run_no_tools(client, item, max_tokens=DEFAULT_NOTOOLS_MAX_TOKENS, attempts=3):
+async def run_no_tools(client, item, max_tokens=DEFAULT_MAX_TOKENS, attempts=3):
     """One streamed completion, retried on transport failure."""
     row, t0 = ep.timed_row(item)
     result, err = await ep.attempt(
         lambda: client.complete(item["prompt"], max_tokens=max_tokens), attempts=attempts)
     content, reasoning_len, usage = result if result else ("", 0, None)
     return ep.finish_row(row, t0, response=content, reasoning_len=reasoning_len,
-                         usage=usage, error=err)
+                         usage=usage, interaction_tokens=context_lengths([usage])[2],
+                         error=err)

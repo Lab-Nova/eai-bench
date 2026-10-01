@@ -71,10 +71,19 @@ def cmd_run(a):
         "endpoint": a.endpoint, "model": a.model,
         "temperature": a.temperature, "top_p": a.top_p,
         "n_subset": len(items), "concurrency": a.concurrency,
-        "max_tokens": a.max_tokens, "max_rounds": a.max_rounds,
+        "max_tokens": a.max_tokens, "gen_budget": a.gen_budget, "max_rounds": a.max_rounds,
         "started_at": rd.config.get("started_at") or __import__("resultdir").now_stamp(),
     }
     cfg = rd.reconcile(incoming, force=a.force)
+    # Budgets are not part of a run's identity (a cap only truncates), but a change must
+    # be on the record: log it to config_history the way --force logs an identity change.
+    for key in ("max_tokens", "gen_budget", "max_rounds"):
+        if cfg.get(key) != incoming[key]:
+            cfg.setdefault("config_history", []).append(
+                {"at": __import__("resultdir").now_stamp(),
+                 "changed": {key: {"from": cfg.get(key), "to": incoming[key]}}})
+            cfg[key] = incoming[key]
+            rd.write_config(cfg)
 
     done_ids, dropped = rd.prepare_resume()
     if dropped:
@@ -93,12 +102,10 @@ def cmd_run(a):
     if with_tools:
         def work(it):
             return runner.run_with_tools(client, it, max_rounds=a.max_rounds,
-                                         gen_budget=a.max_tokens)
+                                         gen_budget=a.gen_budget, max_tokens=a.max_tokens)
     else:
-        budget = a.max_tokens or runner.DEFAULT_NOTOOLS_MAX_TOKENS
-
         def work(it):
-            return runner.run_no_tools(client, it, max_tokens=budget)
+            return runner.run_no_tools(client, it, max_tokens=a.max_tokens)
 
     sink = ep.jsonl_writer(rd.responses_path)
     try:
@@ -227,8 +234,12 @@ def main():
                         "server's --max-running-requests")
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
-    r.add_argument("--max-tokens", type=int, default=0,
-                   help="generation cap; 0 = uncapped in tools mode, 65536 in no-tools mode")
+    r.add_argument("--max-tokens", type=int, default=runner.DEFAULT_MAX_TOKENS,
+                   help="per-request generation cap, both modes (default %(default)s, the "
+                        "suite-wide budget); 0 sends no max_tokens")
+    r.add_argument("--gen-budget", type=int, default=0,
+                   help="tools mode: completion tokens summed over the whole tool loop; "
+                        "0 = uncapped")
     r.add_argument("--max-rounds", type=int, default=0, help="tool-loop cap; 0 = uncapped")
     r.add_argument("--force", action="store_true",
                    help="resume even though endpoint/model/mode changed (recorded in config.json)")

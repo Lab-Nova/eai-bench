@@ -25,6 +25,13 @@ python3 bfcl/src/main.py latency                                 # rank tasks by
 interpreter automatically. Re-running `run` against an existing `--results-dir` resumes:
 `bfcl generate` skips ids already present in its result files.
 
+Every request carries `max_tokens` 131,072 (`--max-tokens`, the suite-wide budget; 0
+sends none, as upstream does). bfcl-eval has no setting for it, so the shim registers a
+subclass of `OpenAICompletionsHandler` that adds it in `generate_with_backoff`. `collect`
+reports `interaction_tokens_median` (with p90 and max): per task, the last request's
+input + output tokens minus the first request's input, from the token counts bfcl-eval
+records per step.
+
 `setup` installs `soundfile` alongside the pin. `bfcl-eval` 2026.3.23 does not declare it,
 but touching `bfcl_eval.constants.model_config` imports the entire handler registry, and
 the Qwen handler reaches `qwen_agent` -> `import soundfile`. Without it a clean install

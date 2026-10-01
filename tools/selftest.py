@@ -280,6 +280,72 @@ def test_babilong_qa3(tmp):
           score.get("by_length") == {"0k": {"correct": 1, "total": 5}}, f"got {score.get('by_length')}")
 
 
+def test_interaction(tmp):
+    """max_tokens on every request, and interaction = final context - prompt."""
+    print("\ninteraction tokens: definition, HLE tool loop, BFCL rows, runtime stats")
+    import asyncio
+    from types import SimpleNamespace as NS
+    from resultdir import context_lengths, interaction_tokens
+    import runner
+
+    check("context_lengths: first prompt to last prompt + completion",
+          context_lengths([{"prompt_tokens": 100, "completion_tokens": 50},
+                           {"prompt_tokens": 300, "completion_tokens": 20}]) == (100, 320, 220))
+    check("context_lengths of nothing is None", context_lengths([None]) == (None, None, None))
+    check("a single-turn row falls back to its completion tokens",
+          interaction_tokens({"usage": {"completion_tokens": 7}}) == 7)
+    check("a multi-turn row without the field is not guessed",
+          interaction_tokens({"rounds": 3, "usage": {"completion_tokens": 7}}) is None)
+
+    class Fake:
+        """Round 1 calls a tool, round 2 answers."""
+        def __init__(self):
+            self.kwargs = []
+
+        async def create(self, messages, **kw):
+            self.kwargs.append(kw)
+            n = len(self.kwargs)
+            usage = NS(completion_tokens=50 if n == 1 else 20,
+                       model_dump=lambda: {"prompt_tokens": 100 if n == 1 else 300,
+                                           "completion_tokens": 50 if n == 1 else 20})
+            calls = [NS(id="c1", function=NS(name="nope", arguments="{}"))] if n == 1 else None
+            msg = NS(content=None if n == 1 else "42", tool_calls=calls)
+            return NS(choices=[NS(message=msg)], usage=usage)
+
+    fake = Fake()
+    row = asyncio.run(runner.run_with_tools(fake, {"id": "x", "prompt": "q"}))
+    check("hle: every tool-loop request carries max_tokens 131072",
+          [k.get("max_tokens") for k in fake.kwargs] == [131072, 131072], f"got {fake.kwargs}")
+    check("hle: interaction spans the item's own conversation",
+          (row.get("prompt_tokens"), row.get("final_context_tokens"),
+           row.get("interaction_tokens")) == (100, 320, 220), f"got {row}")
+
+    sys.path.insert(0, os.path.join(REPO, "bfcl", "src"))
+    try:
+        from importlib.util import module_from_spec, spec_from_file_location
+        spec = spec_from_file_location("bfcl_main", os.path.join(REPO, "bfcl", "src", "main.py"))
+        bm = module_from_spec(spec)
+        spec.loader.exec_module(bm)
+        check("bfcl: single-turn interaction is the output",
+              bm.row_interaction_tokens({"input_token_count": 900, "output_token_count": 40}) == 40)
+        check("bfcl: multi-turn interaction is last in + last out - first in",
+              bm.row_interaction_tokens({"input_token_count": [[900, 1000], [1500]],
+                                         "output_token_count": [[30, 40], [60]]}) == 660)
+    finally:
+        sys.path.remove(os.path.join(REPO, "bfcl", "src"))
+
+    rd = ResultDir.start(tmp, suffix="it")
+    write_rows(rd.responses_path, [
+        {"id": "a", "error": None, "response": "x", "usage": {"completion_tokens": 10}},
+        {"id": "b", "error": None, "response": "x", "interaction_tokens": 30},
+        {"id": "c", "error": None, "response": "x", "interaction_tokens": 20},
+    ])
+    st = rd.runtime_stats()
+    check("runtime_stats reports the median interaction",
+          st.get("interaction_tokens_median") == 20 and st.get("interaction_tokens_max") == 30,
+          f"got {st}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="eai-selftest-")
     try:
@@ -288,6 +354,7 @@ def main():
         test_grading(tmp)
         test_counting_stars(tmp)
         test_babilong_qa3(tmp)
+        test_interaction(tmp)
         test_imported_roundtrip()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

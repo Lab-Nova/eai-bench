@@ -43,6 +43,39 @@ def is_done(row):
     return not row.get("error") and bool((row.get("response") or "").strip())
 
 
+def interaction_tokens(row):
+    """How far one item grew the context: final context length minus prompt length.
+
+    A client records it on the row as `interaction_tokens`. For a single completion it is
+    the completion's token count; for a tool loop it is the last request's prompt plus
+    completion minus the first request's prompt, so it counts the model's turns *and* the
+    tool output fed back to it. Rows written before the field existed fall back to the
+    single-turn reading of `usage`. None when nothing was measured.
+    """
+    t = row.get("interaction_tokens")
+    if isinstance(t, (int, float)):
+        return t
+    usage = row.get("usage") or {}
+    if "rounds" not in row and isinstance(usage.get("completion_tokens"), int):
+        return usage["completion_tokens"]
+    return None
+
+
+def context_lengths(usages):
+    """(prompt, final_context, interaction) tokens from one item's per-request usages.
+
+    `usages` are the usage dicts of the requests of one conversation, in order. The first
+    request's prompt is the prompt; the last request's prompt + completion is the final
+    context. (None, None, None) when no request reported usage.
+    """
+    usages = [u for u in usages if u and u.get("prompt_tokens") is not None]
+    if not usages:
+        return None, None, None
+    prompt = usages[0]["prompt_tokens"]
+    final = usages[-1]["prompt_tokens"] + (usages[-1].get("completion_tokens") or 0)
+    return prompt, final, final - prompt
+
+
 class ResultDir:
     """One run's directory. Create a new one with `start`, reopen one with `open`."""
 
@@ -348,6 +381,11 @@ class ResultDir:
             out["prompt_tokens_total"] = prompt_toks
         if completion_toks:
             out["completion_tokens_total"] = completion_toks
+        inter = sorted(t for t in (interaction_tokens(r) for r in rows) if t is not None)
+        if inter:
+            out["interaction_tokens_median"] = statistics.median(inter)
+            out["interaction_tokens_p90"] = inter[min(len(inter) - 1, int(0.9 * len(inter)))]
+            out["interaction_tokens_max"] = inter[-1]
         rounds = [r["rounds"] for r in rows if isinstance(r.get("rounds"), int)]
         if rounds:
             out["rounds_median"] = statistics.median(rounds)

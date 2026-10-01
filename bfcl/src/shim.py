@@ -49,21 +49,43 @@ def write_env(project_root, endpoint, api_key="EMPTY"):
     return path
 
 
-def register(model, project_root, name=None):
+# The suite-wide per-request generation cap (endpoint.DEFAULT_MAX_TOKENS in the other
+# components; bfcl has no endpoint.py, so the number is repeated here).
+DEFAULT_MAX_TOKENS = 131072
+
+
+def capped_handler(max_tokens):
+    """OpenAICompletionsHandler that sends `max_tokens` on every request.
+
+    Upstream never sends max_tokens -- `_query_FC` and `_query_prompting` both build the
+    kwargs themselves -- so the cap goes in at `generate_with_backoff`, the one call both
+    go through. Calling super() keeps upstream's rate-limit retry decorator.
+    """
+    from bfcl_eval.model_handler.api_inference.openai_completion import (
+        OpenAICompletionsHandler)
+
+    class CappedOpenAICompletionsHandler(OpenAICompletionsHandler):
+        def generate_with_backoff(self, **kwargs):
+            if max_tokens:
+                kwargs.setdefault("max_tokens", max_tokens)
+            return super().generate_with_backoff(**kwargs)
+
+    return CappedOpenAICompletionsHandler
+
+
+def register(model, project_root, name=None, max_tokens=DEFAULT_MAX_TOKENS):
     """Insert the endpoint's ModelConfig into the live mapping. Idempotent."""
     if os.environ.get("BFCL_PROJECT_ROOT") != str(project_root):
         raise RuntimeError("BFCL_PROJECT_ROOT must be set before register() is called: "
                            "importing bfcl_eval creates result/ and score/ under it")
     from bfcl_eval.constants import model_config as mc
-    from bfcl_eval.model_handler.api_inference.openai_completion import (
-        OpenAICompletionsHandler)
 
     name = name or registry_name(model)
     mc.MODEL_CONFIG_MAPPING[name] = mc.ModelConfig(
         model_name=model,           # the string sent as "model" in the request body
         display_name=f"{model} (sglang, FC)",
         url="", org="", license="",
-        model_handler=OpenAICompletionsHandler,
+        model_handler=capped_handler(max_tokens),
         input_price=None, output_price=None,
         is_fc_model=True,
         # True if the model does not support '.' in function names. This is used by the
@@ -74,10 +96,10 @@ def register(model, project_root, name=None):
     return name
 
 
-def run_cli(argv, project_root, model, name=None):
+def run_cli(argv, project_root, model, name=None, max_tokens=DEFAULT_MAX_TOKENS):
     """Register, then invoke the `bfcl` CLI in-process with `argv`."""
     os.environ["BFCL_PROJECT_ROOT"] = str(project_root)
-    name = register(model, project_root, name)
+    name = register(model, project_root, name, max_tokens)
     from bfcl_eval.__main__ import cli
     saved = sys.argv
     sys.argv = ["bfcl", *argv]

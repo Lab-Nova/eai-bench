@@ -198,6 +198,20 @@ def row_output_tokens(row):
     return sum(_leaves(row.get("output_token_count")))
 
 
+def row_interaction_tokens(row):
+    """Final context minus prompt: how far the task grew its own context.
+
+    The token counts are per request (a scalar for single-turn, turn -> step lists for
+    multi-turn), so the prompt is the first request's input and the final context is the
+    last request's input plus its output. Single-turn reduces to the output tokens.
+    """
+    ins = list(_leaves(row.get("input_token_count")))
+    outs = list(_leaves(row.get("output_token_count")))
+    if not ins or not outs:
+        return None
+    return int(ins[-1] + outs[-1] - ins[0])
+
+
 def scan_results(project_root, registry):
     """-> (rows_by_category, failed_by_category)."""
     rows, failed = {}, {}
@@ -219,15 +233,16 @@ def write_id_file(project_root, grouped):
     return path
 
 
-def _generation_child(argv, project_root, model, registry):
+def _generation_child(argv, project_root, model, registry, max_tokens):
     os.setsid()
-    shim.run_cli(argv, project_root, model, registry)
+    shim.run_cli(argv, project_root, model, registry, max_tokens)
 
 
-def run_generation_until(argv, project_root, model, registry, timeout_s):
+def run_generation_until(argv, project_root, model, registry, timeout_s,
+                         max_tokens=shim.DEFAULT_MAX_TOKENS):
     """Stop the entire generation process group at the shared wall-clock deadline."""
     process = multiprocessing.get_context("fork").Process(
-        target=_generation_child, args=(argv, project_root, model, registry))
+        target=_generation_child, args=(argv, project_root, model, registry, max_tokens))
     process.start()
     try:
         process.join(max(0, timeout_s))
@@ -380,7 +395,16 @@ def cmd_run(a):
         "long_tail_excluded": excluded,
         "generation_timeout_s": BENCHMARK_TIMEOUT_S if a.benchmark else None,
         "dispatch_order_sha256": order_sha,
+        "max_tokens": a.max_tokens,
     }, force=a.force)
+    # Not identity, so reconcile keeps the old value; a resume under a different cap
+    # (or a run from before the cap existed) records the change instead of hiding it.
+    if cfg.get("max_tokens") != a.max_tokens:
+        cfg.setdefault("config_history", []).append(
+            {"at": resultdir.now_stamp(),
+             "changed": {"max_tokens": {"from": cfg.get("max_tokens"), "to": a.max_tokens}}})
+        cfg["max_tokens"] = a.max_tokens
+        rd.write_config(cfg)
 
     gen_argv = ["generate",
                 "--model", registry,
@@ -398,11 +422,12 @@ def cmd_run(a):
         if a.benchmark:
             remaining = BENCHMARK_TIMEOUT_S - (time.monotonic() - started)
             if remaining <= 0 or not run_generation_until(
-                    gen_argv, project_root, cfg["model"], registry, remaining):
+                    gen_argv, project_root, cfg["model"], registry, remaining,
+                    a.max_tokens):
                 mark_timeouts(project_root, registry, grouped)
                 break
         else:
-            shim.run_cli(gen_argv, project_root, cfg["model"], registry)
+            shim.run_cli(gen_argv, project_root, cfg["model"], registry, a.max_tokens)
 
         _, failed = scan_results(project_root, registry)
         n_failed = sum(len(v) for v in failed.values())
@@ -507,6 +532,9 @@ def cmd_collect(a):
                    for cat, entries in rows.items()
                    if any(r.get("status") == "timeout" for r in entries)}
     n_timeout = sum(map(len, timeout_ids.values()))
+    interaction = sorted(t for t in (row_interaction_tokens(r)
+                                     for entries in rows.values() for r in entries
+                                     if not is_failed(r)) if t is not None)
 
     score = {
         "component": COMPONENT,
@@ -527,10 +555,19 @@ def cmd_collect(a):
         "results_dir": rd.path,
         "scored_at": resultdir.now_stamp(),
     }
+    if interaction:
+        n = len(interaction)
+        # Flat, like resultdir.runtime_stats in the other components.
+        score.update({
+            "interaction_tokens_median": statistics.median(interaction),
+            "interaction_tokens_p90": interaction[min(n - 1, int(0.9 * n))],
+            "interaction_tokens_max": interaction[-1],
+        })
     # Deadline-limited benchmark scores remain separate from uncapped accuracy.
     for k in ("endpoint", "model", "registry_name", "temperature", "imported",
               "mode", "benchmark", "long_tail_excluded", "dispatch_order_sha256",
-              "concurrency", "generate_wall_s", "generation_timeout_s", "attempts_used"):
+              "concurrency", "generate_wall_s", "generation_timeout_s", "attempts_used",
+              "max_tokens"):
         if k in cfg:
             score[k] = cfg[k]
 
@@ -550,6 +587,11 @@ def cmd_collect(a):
 
     rd._write_json(rd.score_path, score)
     print(json.dumps({k: v for k, v in score.items() if k != "by_category"}, indent=2))
+    if interaction:
+        rs = score
+        print(f"\ninteraction tokens (final context - prompt): median "
+              f"{rs['interaction_tokens_median']:.0f}  p90 {rs['interaction_tokens_p90']}  "
+              f"max {rs['interaction_tokens_max']}")
     if cfg.get("benchmark"):
         print(f"\nbenchmark run: {n_subset} tasks, {n_timeout} timeouts; "
               "timeouts count as incorrect. synthesis.py skips benchmark scores.")
@@ -689,6 +731,9 @@ def main():
                         f"{BENCHMARK_CONCURRENCY} under --benchmark")
     r.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     r.add_argument("--api-key", default="EMPTY")
+    r.add_argument("--max-tokens", type=int, default=shim.DEFAULT_MAX_TOKENS,
+                   help="per-request generation cap (default %(default)s, the suite-wide "
+                        "budget); 0 sends no max_tokens, as upstream bfcl-eval does")
     r.add_argument("--max-attempts", type=int, default=None,
                    help=f"how many times to retry rows holding an inference error "
                         f"(default {DEFAULT_MAX_ATTEMPTS}, every mode)")

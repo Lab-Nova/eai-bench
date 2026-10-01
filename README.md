@@ -89,7 +89,14 @@ Timestamps are UTC and filesystem-safe, so they sort lexically and "latest" is j
 `max()`. `results/` is git-ignored: it is large, per-run, and reproducible.
 
 `score.json` is the only contract between a client and `synthesis.py` — `component`,
-`correct`, `total`, `accuracy`, `complete`, plus runtime statistics. The denominator is
+`correct`, `total`, `accuracy`, `complete`, plus runtime statistics.
+
+Every component asks for at most **131,072 tokens per request** (`--max-tokens`), and
+every `score.json` reports `interaction_tokens_median` (with p90 and max): final context
+length − prompt length per item. For a single-turn item that is its completion; for a
+BFCL multi-turn task or an HLE tool loop it is everything the conversation added between
+the first prompt and the end of the last response. `synthesis.py` prints the median on
+each component's runtime line. The denominator is
 always the **subset**, never the number of items that happened to answer or get graded:
 an item that errored or was never judged is not excused from the denominator, it is
 simply not correct.

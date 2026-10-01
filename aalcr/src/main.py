@@ -33,11 +33,12 @@ RESULTS_BASE = os.path.join(CLIENT_ROOT, "results")
 DEFAULT_DATA_DIR = os.path.join(CLIENT_ROOT, "data")
 
 # The reply is a figure or a sentence, but the model reasons over the whole corpus first,
-# and a fixed cap on that is a fixed cap on the score: under the 24,576-token cap this
-# client used to ship with, 9 of the first 300 answers across three endpoints were all
-# reasoning and no answer. The default is therefore "context": every request gets the
-# whole window the server exposes, max_tokens = context_len - prompt tokens.
-DEFAULT_MAX_TOKENS = "context"
+# and a tight cap on that is a cap on the score: under the 24,576-token cap this client
+# used to ship with, 9 of the first 300 answers across three endpoints were all reasoning
+# and no answer. The default is the suite-wide 131,072 (endpoint.DEFAULT_MAX_TOKENS),
+# well past that tail; "context" still asks for the whole window the server exposes,
+# max_tokens = context_len - prompt tokens.
+DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 DEFAULT_CONTEXT_LEN = 1048576  # GLM-5.3 max_position_embeddings
 # Tokens left unrequested below the window. The server's refusal (below) counts the
 # prompt as it will actually be scheduled, so this only has to absorb rounding between
@@ -93,7 +94,8 @@ async def _run_one(client, item, max_tokens, context_len):
         lambda: client.complete(item["prompt"], max_tokens=budget))
     content, reasoning_len, usage = result if result else ("", 0, None)
     return ep.finish_row(row, t0, response=content, reasoning_len=reasoning_len,
-                         usage=usage, error=err, max_tokens=budget)
+                         usage=usage, interaction_tokens=resultdir.context_lengths([usage])[2],
+                         error=err, max_tokens=budget)
 
 
 def cmd_run(a):
@@ -230,8 +232,8 @@ def main():
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=max_tokens_arg, default=DEFAULT_MAX_TOKENS,
-                   help='integer cap, or "context" (default): the whole window, '
-                        'context_len - prompt tokens, per request')
+                   help='per-request cap (default %(default)s, the suite-wide budget), or '
+                        '"context": the whole window, context_len - prompt tokens')
     r.add_argument("--context-len", type=int, default=DEFAULT_CONTEXT_LEN,
                    help='window size that "context" fills (default %(default)s, GLM-5.3)')
     r.add_argument("--force", action="store_true",

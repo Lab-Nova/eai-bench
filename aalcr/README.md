@@ -26,11 +26,13 @@ existing copy to skip the download.
 with the default `--n-subset`. Each prompt is hundreds of thousands of tokens, so the server's
 prefill queue, not this flag, is what actually paces the run; set a positive value to
 bound it. The resolved number (not the sentinel) is what lands in `config.json`.
-`--max-tokens` defaults to `context`: each request asks for the whole window, `--context-len`
-(1,048,576) minus the prompt's tokens as the server itself counts them (it states the count when
-refusing a deliberately over-long probe, which costs nothing). The answer is a figure or a
-sentence, but the reasoning before it is not small — under the old fixed 24,576 cap 3% of
-answers were all reasoning and no answer. Pass an integer to cap it anyway.
+`--max-tokens` defaults to 131,072, the per-request budget every component uses. The answer
+is a figure or a sentence, but the reasoning before it is not small — under the old fixed
+24,576 cap 3% of answers were all reasoning and no answer. `--max-tokens context` instead
+asks for the whole window, `--context-len` (1,048,576) minus the prompt's tokens as the
+server itself counts them (it states the count when refusing a deliberately over-long
+probe, which costs nothing). `score.json` reports the median, p90 and max
+`interaction_tokens` (final context − prompt, here the completion tokens).
 
 Then grade with the **judge-aalcr** skill, which ends by running `collect`. The skill
 carries the dataset's own v1.1 judge prompts verbatim (Artificial Analysis runs them on

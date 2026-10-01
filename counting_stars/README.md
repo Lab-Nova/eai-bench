@@ -34,9 +34,10 @@ per-needle tally.
 
 Settings:
 - `--concurrency` defaults to 16.
-- `--max-tokens` defaults to `context`, as in aalcr: each request asks for the whole
-  window minus its prompt. The answer itself is short, but at 960k the reasoning before it
-  runs to tens of thousands of tokens.
+- `--max-tokens` defaults to 131,072, the suite-wide per-request budget; `context` asks
+  for the whole window minus the prompt, as in aalcr. The answer itself is short, but at
+  960k the reasoning before it runs to tens of thousands of tokens. `collect` prints and
+  `score.json` records the median `interaction_tokens` (final context − prompt).
 - Install `tokenizers`, `datasets` and `openai`.
 
 ## Scoring

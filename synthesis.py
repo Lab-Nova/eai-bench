@@ -93,6 +93,8 @@ def runtime_line(s):
         bits.append(f"{s['completion_tokens_total']:,} completion tokens")
     if s.get("prompt_tokens_total"):
         bits.append(f"{s['prompt_tokens_total']:,} prompt tokens")
+    if s.get("interaction_tokens_median") is not None:
+        bits.append(f"interaction med {s['interaction_tokens_median']:,.0f} tokens")
     if s.get("rounds_median") is not None:
         bits.append(f"rounds med {s['rounds_median']:g} / max {s['rounds_max']}")
     if s.get("tool_calls_total"):
@@ -201,6 +203,9 @@ def main():
         for c in PROBES:
             print(fmt_probe(c, probes[c]))
             if probes[c]:
+                rl = runtime_line(probes[c])
+                if rl:
+                    print(f"  {'':16s}{rl}")
                 print(f"  {'':16s}  {probe_dirs[c]}")
                 ep_ = (probes[c].get("endpoint"), probes[c].get("model"))
                 if endpoints and ep_ not in endpoints:

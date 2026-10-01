@@ -4,8 +4,8 @@
 
 | Mode | Flag | Generation cap | Tools |
 |---|---|---|---|
-| with tools (default) | `--tools` | none — `max_tokens` is not sent | `python`, `web_search` |
-| no tools | `--no-tools` | 65,536 | none |
+| with tools (default) | `--tools` | 131,072 per request | `python`, `web_search` |
+| no tools | `--no-tools` | 131,072 | none |
 
 **Both modes select the identical 250 ids**, so they are directly comparable;
 `config.json` records `"mode"` as the discriminator. The subset is chosen without an
@@ -43,9 +43,13 @@ a 401 several minutes into a run.
 ## The agentic loop
 
 With tools, the model is driven until it stops calling them. There is **no round cap and
-no `max_tokens`** — the only ceilings are the server's context window and the model
+no total generation budget** — each request carries the suite-wide `max_tokens` of
+131,072, and beyond that the only ceilings are the server's context window and the model
 deciding it is done. Items legitimately run past 100 rounds; the deepest observed in the
-reference run was 491 rounds.
+reference run was 491 rounds. (The reference run sent no `max_tokens` at all. A server
+that refuses prompt + `max_tokens` over the window now reports the context full about
+131k tokens earlier, which goes to the forced final below.) `--gen-budget N` caps the
+completion tokens summed over the loop; `--max-tokens 0` drops the per-request cap.
 
 Both caps were removed because they silently produced empty answers rather than shorter
 ones: under an earlier 40-round cap, all 15 items that hit it returned nothing at all,
@@ -57,7 +61,11 @@ An item must never end without an answer merely because it ran long, so:
 - if the context is full so that is impossible, it rebuilds a short conversation from
   the question plus a digest of the tool findings and asks there.
 
-`forced_final` and `context_full` are recorded per row.
+`forced_final` and `context_full` are recorded per row, along with `prompt_tokens`,
+`final_context_tokens` and `interaction_tokens` = final context − prompt. The final
+context is the last request of the item's own conversation (a rebuilt forced-final
+conversation does not count), so interaction is every assistant turn and tool result the
+item added. `score.json` reports its median, p90 and max.
 
 ## The python tool
 

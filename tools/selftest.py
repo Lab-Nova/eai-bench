@@ -190,12 +190,104 @@ def test_imported_roundtrip():
         run("collect", "--results-dir", path)
 
 
+def _collect(client, path):
+    main = os.path.join(REPO, client, "src", "main.py")
+    r = subprocess.run([sys.executable, main, "collect", "--results-dir", path],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, r.stderr[-300:]
+    with open(os.path.join(path, "score.json"), encoding="utf-8") as f:
+        return json.load(f), ""
+
+
+def test_counting_stars(tmp):
+    """Mechanical scoring: 1 / 0.5 / 0.25 per needle, unanswered items score 0."""
+    print("\ncounting_stars: needle scoring and collect")
+    rd = ResultDir.start(tmp, suffix="cs")
+    ref, wrong = list(range(10, 42)), list(range(110, 142))
+    item = {"lang": "EN", "length": "64k", "prompt_tokens": 64000,
+            "reference": ref, "wrong": wrong}
+    rd.write_subset([{**item, "id": f"EN-64k-s{k}", "sample": k} for k in range(4)], drop=())
+    write_rows(rd.responses_path, [
+        # all correct, wrapped in prose
+        {"id": "EN-64k-s0", "error": None,
+         "response": 'Here: {"little_penguin": ' + json.dumps(ref) + "}"},
+        # first 32 entries: ref[:16] + wrong[:16] -> 16 needles at 0.5, 16 at 0
+        {"id": "EN-64k-s1", "error": None,
+         "response": json.dumps({"little_penguin": ref[:16] + wrong})},
+        # no list at all
+        {"id": "EN-64k-s2", "error": None, "response": "I could not find any stars."},
+        # never answered
+        {"id": "EN-64k-s3", "error": "TimeoutError", "response": ""},
+    ])
+    score, err = _collect("counting_stars", rd.path)
+    check("counting_stars collect runs", score is not None, err)
+    if score is None:
+        return
+    g = {r["id"]: r["score"] for r in rd.read_rows(rd.grades_path)}
+    check("a fully correct list scores 1", g.get("EN-64k-s0") == 1.0, f"got {g}")
+    # the list holds 48 numbers but only the first 32 count: ref[:16] + wrong[:16]
+    check("both counts score 0.5; entries past the 32nd are ignored",
+          abs(g.get("EN-64k-s1", -1) - (16 * 0.5 + 0) / 32) < 1e-9, f"got {g.get('EN-64k-s1')}")
+    check("no list scores 0", g.get("EN-64k-s2") == 0.0)
+    from importlib.util import module_from_spec, spec_from_file_location
+    spec = spec_from_file_location(
+        "cs_scoring", os.path.join(REPO, "counting_stars", "src", "scoring.py"))
+    sc = module_from_spec(spec)
+    spec.loader.exec_module(sc)
+    only_wrong = sc.grade(json.dumps({"little_penguin": wrong}), item)
+    check("only the wrong counts score 0.25 per needle", only_wrong["score"] == 0.25,
+          f"got {only_wrong}")
+    check("an unanswered item scores 0 and stays in the denominator",
+          g.get("EN-64k-s3") == 0.0 and score["total"] == 4)
+    check("the run is incomplete while an item has no answer", score["complete"] is False)
+    check("accuracy is the mean item score", abs(score["accuracy"] - 1.25 / 4) < 1e-6,
+          f"got {score['accuracy']}")
+
+
+def test_babilong_qa3(tmp):
+    """BABILong's match: the target must be the only new label in the first sentence."""
+    print("\nbabilong_qa3: answer matching and collect")
+    rd = ResultDir.start(tmp, suffix="qa3")
+    q = "Where was the apple before the kitchen?"
+    rd.write_subset([{"id": f"qa3-0k-{i}", "length": "0k", "idx": i, "question": q,
+                      "target": "bathroom"} for i in range(5)], drop=())
+    write_rows(rd.responses_path, [
+        {"id": "qa3-0k-0", "error": None,
+         "response": "Before the kitchen the apple was in the bathroom."},
+        {"id": "qa3-0k-1", "error": None,                       # hedges across two rooms
+         "response": "Before the kitchen the apple was in the bathroom or the garden."},
+        {"id": "qa3-0k-2", "error": None,                       # right room, second sentence
+         "response": "It is unclear. Before the kitchen the apple was in the bathroom."},
+        {"id": "qa3-0k-3", "error": None,
+         "response": "Before the kitchen the apple was in the office."},
+        {"id": "qa3-0k-4", "error": "APIConnectionError", "response": ""},
+    ])
+    score, err = _collect("babilong_qa3", rd.path)
+    check("babilong_qa3 collect runs", score is not None, err)
+    if score is None:
+        return
+    g = {r["id"]: r["correct"] for r in rd.read_rows(rd.grades_path)}
+    check("the formatted answer is correct (the question's room is ignored)",
+          g.get("qa3-0k-0") == 1, f"got {g}")
+    check("naming two rooms is wrong", g.get("qa3-0k-1") == 0)
+    check("only the first sentence counts", g.get("qa3-0k-2") == 0)
+    check("the wrong room is wrong", g.get("qa3-0k-3") == 0)
+    check("an unanswered item is ungraded and counts against the subset",
+          "qa3-0k-4" not in g and score["correct"] == 1 and score["total"] == 5
+          and score["complete"] is False)
+    check("by_length carries the per-length tally",
+          score.get("by_length") == {"0k": {"correct": 1, "total": 5}}, f"got {score.get('by_length')}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="eai-selftest-")
     try:
         test_resume(tmp)
         test_config(tmp)
         test_grading(tmp)
+        test_counting_stars(tmp)
+        test_babilong_qa3(tmp)
         test_imported_roundtrip()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

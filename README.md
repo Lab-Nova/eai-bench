@@ -13,11 +13,24 @@ The index is the **equally-weighted mean of the three accuracies**. Each client 
 self-contained: it takes `--endpoint` and `--model`, writes one timestamped results
 directory, and resumes into that directory if interrupted.
 
+Two long-context probes sit alongside the index. They are **not** averaged into it:
+
+| Probe | Size | Grading | What it measures |
+|---|---|---|---|
+| `counting_stars/` | 2 langs × 15 lengths (64k–960k) × 5 samples | machine (needle scores) | multi-needle recall with corrections, EN + ZH |
+| `babilong_qa3/` | 4 lengths (0k/128k/256k/384k) × 100 | machine (BABILong match) | three-fact reasoning over a long haystack |
+
+They exist because they move when the serving stack changes. Weight and KV-cache
+quantizations that leave the three index components flat can still cost 10–15 points on
+qa3 at 256k. `synthesis.py` prints them in a separate section and leaves the composite
+alone, so it stays comparable with the reference numbers below.
+
 ```
 eai-bench/
   README.md
   synthesis.py            latest-or-specified results per client -> composite
   hle/  aalcr/  bfcl/     one benchmark client each: src/, results/, README.md
+  counting_stars/  babilong_qa3/   the long-context probes, same layout
   .claude/skills/         judge-hle, judge-aalcr -- the LLM grading procedures
   tools/                  import_legacy.py, selftest.py
   serving/                the sglang launch script the reference numbers used
@@ -41,6 +54,9 @@ python3 hle/src/main.py   run --endpoint $EP --model $MODEL --tools
 
 python3 aalcr/src/main.py run --endpoint $EP --model $MODEL
 #   ... then grade it with the judge-aalcr skill
+
+python3 counting_stars/src/main.py run --endpoint $EP --model $MODEL   # probes: graded
+python3 babilong_qa3/src/main.py   run --endpoint $EP --model $MODEL   # as they finish
 
 python3 synthesis.py
 ```

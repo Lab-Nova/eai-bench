@@ -4,6 +4,8 @@
 # Datasets are fetched, not vendored.
 aalcr/data/
 hle/data/
+counting_stars/data/
+babilong_qa3/data/
 
 # The bfcl-eval virtualenv (~5.5 GB).
 bfcl/.venv/

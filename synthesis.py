@@ -8,6 +8,10 @@
 Reads only each run's `score.json`, never raw responses, so the three clients stay
 independent of this script and of each other.
 
+Two long-context probes, Counting-Stars and BABILong qa3, are reported underneath when a
+scored run exists. They are not part of the index: it stays the mean of the three, so
+it remains comparable with every composite reported before the probes existed.
+
 The index is the equally-weighted mean of three accuracies:
 
     BFCL v4 (500 tasks, machine-graded)
@@ -28,6 +32,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENTS = ("bfcl", "hle", "aalcr")
 LABELS = {"bfcl": "BFCL-500", "hle": "HLE-250", "aalcr": "AA-LCR-100"}
+# Reported alongside the index, never averaged into it.
+PROBES = ("counting_stars", "babilong_qa3")
+PROBE_LABELS = {"counting_stars": "Counting-Stars", "babilong_qa3": "BABILong-qa3"}
 
 
 def load_score(path):
@@ -93,11 +100,30 @@ def runtime_line(s):
     return "  " + ", ".join(bits) if bits else ""
 
 
+def fmt_probe(c, s):
+    label = PROBE_LABELS[c]
+    if s is None:
+        return f"  {label:16s} {'not run':>16s}"
+    flag = "" if s.get("complete", True) else "  INCOMPLETE"
+    if c == "counting_stars":
+        head = (f"  {label:16s} {s['accuracy']:.3f} +- {s.get('accuracy_se', 0):.3f}"
+                f" over {s['total']}{flag}")
+        cut = "  ".join(f"{k} {v:.3f}" for k, v in (s.get("by_lang") or {}).items())
+    else:
+        head = f"  {label:16s} {s['correct']:4d}/{s['total']:<4d} {pct(s):6.2f}%{flag}"
+        cut = "  ".join(f"{k} {100 * v['correct'] / v['total']:.0f}%"
+                        for k, v in (s.get("by_length") or {}).items() if v.get("total"))
+    return head + (f"\n  {'':16s}  {cut}" if cut else "")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     for c in CLIENTS:
         p.add_argument(f"--{c}", help=f"{c} results directory (default: latest scored)")
+    for c in PROBES:
+        p.add_argument(f"--{c.replace('_', '-')}", dest=c,
+                       help=f"{c} results directory (default: latest scored)")
     p.add_argument("--hle-no-tools", help="an HLE no-tools run to report as a reference")
     p.add_argument("--json", help="also write the summary here")
     p.add_argument("--allow-partial", action="store_true",
@@ -168,6 +194,19 @@ def main():
                   f"incorrect -- this composite is a floor, not a final number.")
     print("=" * 66)
 
+    probe_dirs = {c: getattr(a, c) or latest_scored(c) for c in PROBES}
+    probes = {c: (load_score(d) if d else None) for c, d in probe_dirs.items()}
+    if any(probes.values()):
+        print("\nLong-context probes (not in the index)")
+        for c in PROBES:
+            print(fmt_probe(c, probes[c]))
+            if probes[c]:
+                print(f"  {'':16s}  {probe_dirs[c]}")
+                ep_ = (probes[c].get("endpoint"), probes[c].get("model"))
+                if endpoints and ep_ not in endpoints:
+                    print(f"  {'':16s}  NOTE: measured against {ep_[1]} @ {ep_[0]}, "
+                          f"not the index's endpoint")
+
     native = (scores["bfcl"] or {}).get("native_weighted_overall")
     if native and native.get("overall_acc"):
         print(f"\nFor reference, bfcl-eval's own category-weighted Overall Acc: "
@@ -178,6 +217,8 @@ def main():
         out = {"composite": composite,
                "components": {c: scores[c] for c in CLIENTS},
                "results_dirs": dirs,
+               "probes": {c: probes[c] for c in PROBES},
+               "probe_dirs": probe_dirs,
                "hle_no_tools_reference": ref}
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)

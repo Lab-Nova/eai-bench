@@ -20,6 +20,8 @@ import zipfile
 N_SUBSET = 100
 REPO = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main"
 FILES = ("AA-LCR_Dataset.csv", "AA-LCR_extracted-text.zip")
+# Where each file sits in the HF repo: the zip is under extracted_text/, not the root.
+REMOTE = {"AA-LCR_extracted-text.zip": "extracted_text/AA-LCR_extracted-text.zip"}
 
 PROMPT_TEMPLATE = """BEGIN INPUT DOCUMENTS
 
@@ -48,7 +50,7 @@ def ensure_data(data_dir):
         dest = os.path.join(data_dir, name)
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
             continue
-        url = f"{REPO}/{name}"
+        url = f"{REPO}/{REMOTE.get(name, name)}"
         print(f"fetching {url}", flush=True)
         tmp = dest + ".part"
         try:

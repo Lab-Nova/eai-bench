@@ -96,10 +96,30 @@ def register(model, project_root, name=None, max_tokens=DEFAULT_MAX_TOKENS):
     return name
 
 
+def reset_multi_turn_state():
+    """Drop bfcl-eval's cached multi-turn environments; returns how many were dropped.
+
+    execute_multi_turn_func_call keeps one instance per (model, test id, class) in its
+    module globals and reuses it whenever the name is already there. Within one process a
+    retried multi-turn test therefore resumes from whatever filesystem / API state its
+    timed-out attempt left behind, not from the scenario: on a loaded server the repair
+    pass scored 15/81 on retried multi-turn rows against ~60% for first attempts.
+    """
+    from bfcl_eval.eval_checker.multi_turn_eval import multi_turn_utils as mtu
+    stale = [k for k in vars(mtu) if k.endswith("_instance")]
+    for k in stale:
+        delattr(mtu, k)
+    return len(stale)
+
+
 def run_cli(argv, project_root, model, name=None, max_tokens=DEFAULT_MAX_TOKENS):
-    """Register, then invoke the `bfcl` CLI in-process with `argv`."""
+    """Register, then invoke the `bfcl` CLI in-process with `argv`.
+
+    Every call starts from clean multi-turn environments (see reset_multi_turn_state).
+    """
     os.environ["BFCL_PROJECT_ROOT"] = str(project_root)
     name = register(model, project_root, name, max_tokens)
+    reset_multi_turn_state()
     from bfcl_eval.__main__ import cli
     saved = sys.argv
     sys.argv = ["bfcl", *argv]

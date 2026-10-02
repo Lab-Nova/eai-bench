@@ -41,6 +41,11 @@ DEFAULT_DATA_DIR = os.path.join(CLIENT_ROOT, "data")
 DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 DEFAULT_CONTEXT_LEN = 1048576  # GLM-5.3 max_position_embeddings
 CONTEXT_MARGIN = 16
+# An integer cap is lowered to fit prompt + output in the window: at 960k the prompt is
+# ~983k tokens, and sglang refuses prompt + max_tokens over context_len outright rather
+# than stopping at the window. 512 covers the chat template on top of prompt_tokens, as
+# in the original Counting-Stars runner.
+TEMPLATE_MARGIN = 512
 _INPUT_TOKENS_RE = re.compile(r"(\d+) tokens from the input messages")
 # 150 requests of up to a million tokens each: the server's KV pool, not this flag, is
 # the real limit, and far past it extra requests only queue prefills behind each other.
@@ -76,6 +81,8 @@ async def context_budget(client, prompt, context_len):
 async def _run_one(client, item, max_tokens, context_len):
     row, t0 = ep.timed_row(item, drop=("prompt", "reference", "wrong"))
     budget = max_tokens
+    if isinstance(budget, int) and budget and item.get("prompt_tokens"):
+        budget = min(budget, context_len - item["prompt_tokens"] - TEMPLATE_MARGIN)
     if max_tokens == "context":
         budget, err = await ep.attempt(
             lambda: context_budget(client, item["prompt"], context_len))

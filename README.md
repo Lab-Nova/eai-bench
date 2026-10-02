@@ -139,6 +139,52 @@ counted as a spurious incorrect had it not been spotted by hand.
 
 ## Reference numbers
 
+### GLM-5.3 BF16, current suite
+
+GLM-5.3 BF16 weights with a BF16 KV cache, under sglang on 4 GB300 trays (16 GPUs, TP16),
+October 2026. Every component ran in full at the 131,072-token cap. Accuracy SE is
+binomial over the whole subset; Counting-Stars SE is over its 30 (language, length)
+cells. Median-interaction SE is a 2000-resample bootstrap over the items that have a
+count (`compare/eai_stats.py` in workspace-needle).
+
+| Component | Accuracy | Median interaction (tokens) |
+|---|---|---|
+| BFCL-500 | 374/500 = 74.80 ± 1.94% | 195 ± 7 |
+| HLE-250 with tools | 131/250 = 52.40 ± 3.16% | 22,839 ± 2,764 |
+| AA-LCR-100 (v1.1) | 78/100 = 78.00 ± 4.14% | 2,198 ± 462 (n=99) |
+| **Composite** | **68.40 / 100** | |
+| Counting-Stars (probe) | 137.53/150 = 91.69 ± 1.21% | 1,948 ± 92 |
+| BABILong qa3 (probe) | 220/400 = 55.00 ± 2.49% | 22,316 ± 2,114 (n=373) |
+
+The qa3 split by length is 0k 100/100, 128k 51/100, 256k 40/100 and 384k 29/100. qa3
+uses the clarified question (see `babilong_qa3/README.md`), so it is not comparable with
+the 256k reference rows measured with the upstream question.
+
+Answers that hit the cap are empty and count as wrong. They stay in the accuracy
+denominator but have no interaction count: 1 AA-LCR item and 27 qa3 items. Errors and
+dropped streams from server load were retried until every item had a response. BFCL
+multi-turn retries start from clean environments (see `bfcl/README.md`).
+
+The same suite against two quantized serving stacks, each on 2 trays (8 GPUs):
+
+| Component | MXFP4 (MR-GPTQ v2) / BF16 KV | MXFP4 (MR-GPTQ v2) / FP8 KV (FlashMLA, per-128 scaled) |
+|---|---|---|
+| BFCL-500 | 77.00 ± 1.88% · 198 ± 10 | 75.00 ± 1.94% · 198 ± 11 |
+| HLE-250 with tools | 47.20 ± 3.16% · 16,874 ± 2,213 | 54.80 ± 3.15% · 19,946 ± 4,047 |
+| AA-LCR-100 | 80.00 ± 4.00% · 2,544 ± 477 | 80.00 ± 4.00% · 2,478 ± 411 |
+| **Composite** | **68.07** | **69.93** |
+| Counting-Stars | 91.15 ± 1.47% · 2,072 ± 158 | 91.25 ± 1.25% · 1,911 ± 101 |
+| BABILong qa3 | 56.50 ± 2.48% · 20,921 ± 2,360 | 60.00 ± 2.45% · 21,763 ± 2,748 |
+
+Each cell is accuracy · median interaction tokens. On the MXFP4 / BF16 KV run, one HLE
+item went into a runaway tool loop: about 9,000 rounds, with the context growing from
+81k to 272k tokens. It was stopped by hand and scored wrong, so that run's HLE is
+`complete: false`. The BF16 run solved the same item in 37 rounds. One Counting-Stars
+answer on that run (EN-640k) hit the cap. No difference from BF16 exceeds 1.5 combined
+standard errors.
+
+### Legacy eai-v1.0 run
+
 `tools/import_legacy.py` converts the original `eai-v1.0` run into four dated result
 directories, which is also the regression test for this repo — the numbers must come
 back unchanged:

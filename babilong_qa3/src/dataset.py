@@ -15,13 +15,21 @@ Lengths are GPT-2 tokens of the haystack, as in BABILong itself:
   `length - 300` tokens of message. The generator is deterministic, so every machine gets
   the same 100 samples; they are the ones the reference numbers were measured on.
 
-The prompt is BABILong's default for qa3 -- instruction, two in-context examples, the
-answer-format post-prompt, then <context>...</context> and the question -- verbatim from
-babilong/prompts.py, with the system prompt the BABILong leaderboard uses.
+The prompt is BABILong's default for qa3 -- instruction, in-context examples, the
+answer-format post-prompt, then <context>...</context> and the question -- from
+babilong/prompts.py, with the system prompt the BABILong leaderboard uses, except for one
+change: the question. Upstream asks "Where was the milk before the hallway?", but in about
+a quarter of the samples the item enters the hallway more than once, and the gold answer
+is always the room it was in just before its *last* entry. Nothing in the prompt says so,
+and GLM-5.3 answers for the first entry often enough to cost 1-4 points at 0k. So every
+question is rewritten to say it (`clarify`), and the examples follow suit, with a third
+one in which the item revisits the asked room. Scores are therefore not comparable with
+upstream BABILong numbers.
 """
 
 import json
 import os
+import re
 import urllib.request
 import zipfile
 
@@ -41,7 +49,8 @@ SEED = 42
 
 SYSTEM_PROMPT = "You are a helpful AI assistant."
 
-# babilong/prompts.py: DEFAULT_TEMPLATE and DEFAULT_PROMPTS["qa3"], verbatim.
+# babilong/prompts.py: DEFAULT_TEMPLATE and DEFAULT_PROMPTS["qa3"], verbatim except that the
+# example questions use the clarified wording and a third example shows a revisit.
 TEMPLATE = ("{instruction}\n\n{examples}\n\n{post_prompt}\n\n"
             "<context>\n{context}\n</context>\n\nQuestion: {question}")
 INSTRUCTION = (
@@ -56,14 +65,20 @@ EXAMPLES = (
     '<example>\n'
     'John journeyed to the bedroom. Mary grabbed the apple. Mary went back to the bathroom. '
     'Daniel journeyed to the bedroom. Daniel moved to the garden. Mary travelled to the kitchen. '
-    'Where was the apple before the kitchen?\n'
+    'Where was the apple just before it was last carried into the kitchen?\n'
     'Answer: Before the kitchen the apple was in the bathroom.\n'
     '</example>\n'
     '<example>\n'
     'John went back to the bedroom. John went back to the garden. John went back to the kitchen. '
     'Sandra took the football. Sandra travelled to the garden. Sandra journeyed to the bedroom. '
-    'Where was the football before the bedroom?\n'
+    'Where was the football just before it was last carried into the bedroom?\n'
     'Answer: Before the bedroom the football was in the garden.\n'
+    '</example>\n'
+    '<example>\n'
+    'Mary journeyed to the kitchen. Mary took the milk. Mary went to the office. '
+    'Mary moved to the garden. Mary travelled to the hallway. Mary went back to the garden. '
+    'Where was the milk just before it was last carried into the garden?\n'
+    'Answer: Before the garden the milk was in the hallway.\n'
     '</example>')
 POST_PROMPT = (
     'Always return your answer in the following format: '
@@ -75,6 +90,17 @@ def parse_length(name):
     if name.endswith("m"):
         return int(float(name[:-1]) * 1_000_000)
     return int(float(name.rstrip("k")) * 1000)
+
+
+UPSTREAM_QUESTION = re.compile(r"Where was the (\w+) before the (\w+)\?\s*")
+
+
+def clarify(question):
+    """Upstream's "Where was the X before the Y?" -> the unambiguous last-entry form."""
+    m = UPSTREAM_QUESTION.fullmatch(question)
+    if not m:
+        raise ValueError(f"unexpected qa3 question: {question!r}")
+    return f"Where was the {m[1]} just before it was last carried into the {m[2]}?"
 
 
 def format_prompt(context, question):
@@ -191,9 +217,10 @@ def build_items(data_dir, keys):
     items = []
     for ln, idx in keys:
         s = splits[ln][idx]
+        q = clarify(s["question"])
         items.append({"id": f"{TASK}-{ln}-{idx}", "length": ln, "idx": idx,
-                      "question": s["question"], "target": s["target"],
-                      "prompt": format_prompt(s["input"], s["question"])})
+                      "question": q, "target": s["target"],
+                      "prompt": format_prompt(s["input"], q)})
     return items
 
 

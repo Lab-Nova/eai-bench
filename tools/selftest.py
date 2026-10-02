@@ -247,9 +247,21 @@ def test_counting_stars(tmp):
 
 def test_babilong_qa3(tmp):
     """BABILong's match: the target must be the only new label in the first sentence."""
-    print("\nbabilong_qa3: answer matching and collect")
+    print("\nbabilong_qa3: question rewrite, answer matching and collect")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "qa3_dataset", os.path.join(REPO, "babilong_qa3", "src", "dataset.py"))
+    ds = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ds)
+    q = ds.clarify("Where was the apple before the kitchen? ")
+    check("the upstream question is rewritten to name the last entry",
+          q == "Where was the apple just before it was last carried into the kitchen?", f"got {q!r}")
+    try:
+        ds.clarify("Where is the apple?")
+        check("an unexpected question shape is refused", False)
+    except ValueError:
+        check("an unexpected question shape is refused", True)
     rd = ResultDir.start(tmp, suffix="qa3")
-    q = "Where was the apple before the kitchen?"
     rd.write_subset([{"id": f"qa3-0k-{i}", "length": "0k", "idx": i, "question": q,
                       "target": "bathroom"} for i in range(5)], drop=())
     write_rows(rd.responses_path, [
@@ -333,6 +345,26 @@ def test_interaction(tmp):
                                          "output_token_count": [[30, 40], [60]]}) == 660)
     finally:
         sys.path.remove(os.path.join(REPO, "bfcl", "src"))
+
+    # A retried multi-turn test must start from its scenario, not from the state its
+    # failed attempt left in bfcl-eval's cached environment. Needs the bfcl venv.
+    probe = (
+        "import sys; sys.path.insert(0, 'bfcl/src'); import shim\n"
+        "from bfcl_eval.eval_checker.multi_turn_eval.multi_turn_utils import "
+        "execute_multi_turn_func_call as ex\n"
+        "cfg = {'GorillaFileSystem': {'root': {'w': {'type': 'directory', 'contents': {}}}}}\n"
+        "ex(['mkdir(dir_name=\"stale\")'], cfg, ['GorillaFileSystem'], 'm', 't')\n"
+        "shim.reset_multi_turn_state()\n"
+        "print(ex(['ls()'], cfg, ['GorillaFileSystem'], 'm', 't')[0][0])\n")
+    venv_py = os.path.join(REPO, "bfcl", ".venv", "bin", "python")
+    p = (subprocess.run([venv_py, "-c", probe], cwd=REPO, capture_output=True, text=True)
+         if os.path.exists(venv_py) else None)
+    if p is None or "No module named" in p.stderr or "cannot execute" in p.stderr:
+        print("  skip  bfcl: multi-turn reset (bfcl/.venv not usable on this host)")
+    else:
+        check("bfcl: a reset multi-turn environment starts from its scenario",
+              p.returncode == 0 and '"current_directory_content": []' in p.stdout,
+              (p.stdout + p.stderr)[-300:])
 
     rd = ResultDir.start(tmp, suffix="it")
     write_rows(rd.responses_path, [

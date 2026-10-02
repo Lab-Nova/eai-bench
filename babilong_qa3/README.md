@@ -54,11 +54,26 @@ Everything lands in `babilong_qa3/data/`, which is git-ignored.
 
 ## Prompt and scoring
 
-The prompt is BABILong's default for qa3, verbatim from `babilong/prompts.py`: the
-instruction, two in-context examples, and the post-prompt "Always return your answer in
-the following format: Before the $location_1$ the $item$ was in the $location_2$."
-Then come `<context>…</context>` and the question. The system prompt is "You are a
-helpful AI assistant.".
+The prompt is BABILong's default for qa3 from `babilong/prompts.py`: the instruction,
+the in-context examples, and the post-prompt "Always return your answer in the following
+format: Before the $location_1$ the $item$ was in the $location_2$." Then come
+`<context>…</context>` and the question. The system prompt is "You are a helpful AI
+assistant.".
+
+One thing differs from upstream: the question. Upstream asks "Where was the milk before
+the hallway?". In 23–28 of the 100 samples at each length, the item enters that room more
+than once. The gold answer is always the room it was in just before its *last* entry, but
+the prompt never says so. At 0k, every miss GLM-5.3 made was this misreading (answering
+for the first entry), worth 1–4 points. At 128k it covered 3–10 misses per endpoint,
+mixed with genuine tracking failures. So every question is rewritten to
+
+> Where was the milk just before it was last carried into the hallway?
+
+The two upstream examples use the same wording, and a third example shows an item that
+revisits the asked room. Replaying the bAbI facts confirms that this reading gives the
+gold answer on all 400 samples. The question sits right after the context rather than
+in the instruction, so a long haystack cannot push it out of view. Scores are therefore
+not comparable with published BABILong qa3 numbers.
 
 Grading is `compare_answers` from `babilong/metrics.py`. Only the first sentence of the
 answer counts. It is correct when the target room is the only qa3 room it mentions,
@@ -66,7 +81,8 @@ after dropping rooms the question itself names. Naming two rooms is wrong.
 
 ## Reference numbers
 
-GLM-5.3, 100 samples, 256k, `max_tokens` 131072:
+GLM-5.3, 100 samples, 256k, `max_tokens` 131072, measured with the upstream question
+(before the rewrite above):
 
 | Weights / KV cache | qa3 256k |
 |---|---|
@@ -79,6 +95,17 @@ GLM-5.3, 100 samples, 256k, `max_tokens` 131072:
 
 Paired differences on the same 100 items have an SE of about 6 points, so a gap under
 about 12 points is within noise.
+
+With the clarified question, all 400 samples, `max_tokens` 131072, October 2026:
+
+| Weights / KV cache | 0k | 128k | 256k | 384k | All 400 | Median interaction |
+|---|---|---|---|---|---|---|
+| BF16 / BF16 | 100 | 51 | 40 | 29 | 55.0 ± 2.5% | 22,316 ± 2,114 |
+| MXFP4 (MR-GPTQ v2) / BF16 | 100 | 55 | 38 | 33 | 56.5 ± 2.5% | 20,921 ± 2,360 |
+| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 100 | 50 | 51 | 39 | 60.0 ± 2.5% | 21,763 ± 2,748 |
+
+On each endpoint, 27 answers ran past the cap and scored wrong. The median interaction
+is taken over the 373 that finished.
 
 ## Files
 

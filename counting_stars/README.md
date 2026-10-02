@@ -38,6 +38,9 @@ Settings:
   for the whole window minus the prompt, as in aalcr. The answer itself is short, but at
   960k the reasoning before it runs to tens of thousands of tokens. `collect` prints and
   `score.json` records the median `interaction_tokens` (final context − prompt).
+  Past about 917k the cap is lowered to `--context-len` − prompt − 512 so the request
+  fits the window (sglang refuses prompt + `max_tokens` over it); the cap actually sent
+  is recorded per row as `max_tokens`.
 - Install `tokenizers`, `datasets` and `openai`.
 
 ## Scoring
@@ -90,7 +93,5 @@ GLM-5.3 at 1 sample per cell (30 prompts), EN+ZH mean ± SE over prompts:
 | MXFP4 (MR-GPTQ v2) / BF16 | 0.944 ± 0.012 |
 | MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 0.923 ± 0.015 |
 
-## Files
-
-`main.py` CLI · `dataset.py` inputs and prompt construction · `scoring.py` answer parsing
-and needle scores · `endpoint.py`, `resultdir.py` vendored.
+Current suite (5 samples per cell, 150 requests, `max_tokens` 131072), October 2026,
+mean ± SE over the 30 cells, with the median interaction tokens ± bootstrap 

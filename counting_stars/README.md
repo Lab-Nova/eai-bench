@@ -94,4 +94,17 @@ GLM-5.3 at 1 sample per cell (30 prompts), EN+ZH mean ± SE over prompts:
 | MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 0.923 ± 0.015 |
 
 Current suite (5 samples per cell, 150 requests, `max_tokens` 131072), October 2026,
-mean ± SE over the 30 cells, with the median interaction tokens ± bootstrap 
+mean ± SE over the 30 cells, with the median interaction tokens ± bootstrap SE:
+
+| Weights / KV cache | Score | Median interaction |
+|---|---|---|
+| BF16 / BF16 | 0.917 ± 0.012 | 1,948 ± 92 |
+| MXFP4 (MR-GPTQ v2) / BF16 | 0.911 ± 0.015 | 2,072 ± 158 |
+| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 0.913 ± 0.013 | 1,911 ± 101 |
+
+One MXFP4 / BF16 answer (EN-640k) hit the cap and scored 0.
+
+## Files
+
+`main.py` CLI · `dataset.py` inputs and prompt construction · `scoring.py` answer parsing
+and needle scores · `endpoint.py`, `resultdir.py` vendored.

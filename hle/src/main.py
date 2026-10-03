@@ -72,12 +72,13 @@ def cmd_run(a):
         "temperature": a.temperature, "top_p": a.top_p,
         "n_subset": len(items), "concurrency": a.concurrency,
         "max_tokens": a.max_tokens, "gen_budget": a.gen_budget, "max_rounds": a.max_rounds,
+        "max_tool_calls": a.max_tool_calls,
         "started_at": rd.config.get("started_at") or __import__("resultdir").now_stamp(),
     }
     cfg = rd.reconcile(incoming, force=a.force)
     # Budgets are not part of a run's identity (a cap only truncates), but a change must
     # be on the record: log it to config_history the way --force logs an identity change.
-    for key in ("max_tokens", "gen_budget", "max_rounds"):
+    for key in ("max_tokens", "gen_budget", "max_rounds", "max_tool_calls"):
         if cfg.get(key) != incoming[key]:
             cfg.setdefault("config_history", []).append(
                 {"at": __import__("resultdir").now_stamp(),
@@ -102,7 +103,8 @@ def cmd_run(a):
     if with_tools:
         def work(it):
             return runner.run_with_tools(client, it, max_rounds=a.max_rounds,
-                                         gen_budget=a.gen_budget, max_tokens=a.max_tokens)
+                                         gen_budget=a.gen_budget, max_tokens=a.max_tokens,
+                                         max_tool_calls=a.max_tool_calls)
     else:
         def work(it):
             return runner.run_no_tools(client, it, max_tokens=a.max_tokens)
@@ -179,7 +181,8 @@ def cmd_audit(a):
     print(f"marked-correct-but-empty: {len(bad)} {bad}")
     print(f"rows with error set: {sum(1 for r in rows if r.get('error'))}")
     print(f"forced_final: {sum(1 for r in rows if r.get('forced_final'))}  "
-          f"context_full: {sum(1 for r in rows if r.get('context_full'))}")
+          f"context_full: {sum(1 for r in rows if r.get('context_full'))}  "
+          f"tool_budget_hit: {sum(1 for r in rows if r.get('tool_budget_hit'))}")
 
     # With web search enabled the model can in principle retrieve the question set
     # itself. Official "HLE w/ tools" numbers carry the same exposure, but it should be
@@ -241,6 +244,9 @@ def main():
                    help="tools mode: completion tokens summed over the whole tool loop; "
                         "0 = uncapped")
     r.add_argument("--max-rounds", type=int, default=0, help="tool-loop cap; 0 = uncapped")
+    r.add_argument("--max-tool-calls", type=int, default=runner.DEFAULT_MAX_TOOL_CALLS,
+                   help="tools mode: tool calls an item may execute (default %(default)s); "
+                        "every tool result reports the budget left; 0 = uncapped")
     r.add_argument("--force", action="store_true",
                    help="resume even though endpoint/model/mode changed (recorded in config.json)")
     r.set_defaults(fn=cmd_run)

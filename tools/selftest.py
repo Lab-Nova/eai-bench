@@ -332,6 +332,44 @@ def test_interaction(tmp):
           (row.get("prompt_tokens"), row.get("final_context_tokens"),
            row.get("interaction_tokens")) == (100, 320, 220), f"got {row}")
 
+    class Greedy:
+        """Asks for two tool calls every round until told to stop, then answers."""
+        def __init__(self):
+            self.convos = []
+
+        async def create(self, messages, **kw):
+            self.convos.append([dict(m) for m in messages])
+            n = len(self.convos)
+            usage = NS(completion_tokens=1, model_dump=lambda: {"prompt_tokens": 10 * n,
+                                                                "completion_tokens": 1})
+            if kw.get("tool_choice") == "none":
+                msg = NS(content="7", tool_calls=None)
+            else:
+                msg = NS(content=None, tool_calls=[
+                    NS(id=f"r{n}a", function=NS(name="nope", arguments="{}")),
+                    NS(id=f"r{n}b", function=NS(name="nope", arguments="{}"))])
+            return NS(choices=[NS(message=msg)], usage=usage)
+
+    greedy = Greedy()
+    row = asyncio.run(runner.run_with_tools(greedy, {"id": "y", "prompt": "q"}, max_tool_calls=3))
+    tool_msgs = [m for m in greedy.convos[-1] if m["role"] == "tool"]
+    check("hle: the default tool-call budget is 1024", runner.DEFAULT_MAX_TOOL_CALLS == 1024)
+    check("hle: only the budgeted tool calls execute",
+          row.get("tool_calls") == 3 and len(row.get("tool_trace") or []) == 3, f"got {row}")
+    check("hle: every tool result reports the budget left",
+          [m["content"].split("[tool budget: ")[-1].split("]")[0] for m in tool_msgs]
+          == ["1 of 3 tool calls used, 2 remaining", "2 of 3 tool calls used, 1 remaining",
+              "3 of 3 tool calls used, 0 remaining", "3 of 3 tool calls used, 0 remaining"],
+          f"got {[m['content'] for m in tool_msgs]}")
+    check("hle: a call past the budget is answered, not run",
+          tool_msgs[-1]["content"].startswith("Not executed.") and "exhausted" in tool_msgs[-1]["content"])
+    check("hle: an exhausted budget goes to the forced final with an answer",
+          row.get("tool_budget_hit") is True and row.get("forced_final") is True
+          and row.get("response") == "7", f"got {row}")
+    row = asyncio.run(runner.run_with_tools(Fake(), {"id": "z", "prompt": "q"}, max_tool_calls=0))
+    check("hle: max_tool_calls=0 leaves the loop uncapped",
+          row.get("tool_budget_hit") is False and row.get("response") == "42", f"got {row}")
+
     sys.path.insert(0, os.path.join(REPO, "bfcl", "src"))
     try:
         from importlib.util import module_from_spec, spec_from_file_location

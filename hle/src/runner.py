@@ -2,9 +2,9 @@
 
 no-tools: one streamed completion, capped at max_tokens.
 tools:    an agentic loop -- the model calls `python` and `web_search` until it stops,
-          with no round cap; each request is capped at max_tokens, so the ceilings are
-          that per-request budget, the server's context window, and the model deciding
-          it is done.
+          or until it has used its tool-call budget (DEFAULT_MAX_TOOL_CALLS). Every tool
+          result tells the model how much of that budget is left. Each request is also
+          capped at max_tokens, and the server's context window bounds the conversation.
 
 An item must never end without an answer merely because it ran long. If the context
 does fill, the loop falls back to a fresh short conversation carrying the question plus
@@ -23,6 +23,12 @@ from resultdir import context_lengths
 # pass then dropped the cap entirely, and now carries the same budget as every other
 # component instead.
 DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
+
+# Tool calls an item may execute. The BF16 reference run's most tool-hungry correct item
+# used 437 and its deepest 867; an fp4 run's runaway loop went to ~9,000 rounds before it
+# was stopped by hand. Calls past the budget are answered "not executed" and the item
+# goes to the forced final.
+DEFAULT_MAX_TOOL_CALLS = 1024
 
 _CTX_PAT = re.compile(
     r"context length|context window|longer than|maximum context|too long|"
@@ -55,6 +61,17 @@ async def _exec_tool(tc):
     if pool is None:
         return fn()
     return await asyncio.get_running_loop().run_in_executor(pool, fn)
+
+
+def _budget_note(used, cap):
+    """Appended to every tool result, so the model always knows what it has left."""
+    if not cap:
+        return f"\n\n[tool calls used: {used}; no tool-call limit]"
+    left = max(cap - used, 0)
+    note = f"\n\n[tool budget: {used} of {cap} tool calls used, {left} remaining]"
+    if not left:
+        note += " The tool budget is exhausted: no further tool calls will run. Give your final answer."
+    return note
 
 
 def _digest(trace, limit=60000):
@@ -115,18 +132,19 @@ def _usage(resp):
 
 
 async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
-                         max_tokens=DEFAULT_MAX_TOKENS):
+                         max_tokens=DEFAULT_MAX_TOKENS, max_tool_calls=DEFAULT_MAX_TOOL_CALLS):
     """The agentic loop.
 
     `max_tokens` caps each request; `gen_budget` caps completion tokens summed over the
-    whole loop; `max_rounds` caps tool rounds. 0 means no cap for any of them.
+    whole loop; `max_rounds` caps tool rounds; `max_tool_calls` caps executed tool calls.
+    0 means no cap for any of them.
     """
     row, t0 = ep.timed_row(item)
     messages = [{"role": "user", "content": item["prompt"]}]
     usages = []  # one per request of this conversation, in order
     spent = rounds = ncalls = 0
     final, trace, err = "", [], None
-    forced = ctx_full = False
+    forced = ctx_full = budget_hit = False
     try:
         while True:
             if max_rounds and rounds >= max_rounds:
@@ -168,12 +186,23 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             if not msg.tool_calls:
                 final = msg.content or ""
                 break
-            results = await asyncio.gather(*(_exec_tool(tc) for tc in msg.tool_calls))
-            for tc, out in zip(msg.tool_calls, results):
+            # Every tool_call id needs a reply, so calls past the budget are answered
+            # rather than dropped; only the ones within it run.
+            room = len(msg.tool_calls) if not max_tool_calls else max(max_tool_calls - ncalls, 0)
+            run, skip = msg.tool_calls[:room], msg.tool_calls[room:]
+            results = await asyncio.gather(*(_exec_tool(tc) for tc in run))
+            for tc, out in zip(run, results):
                 ncalls += 1
                 trace.append({"round": rounds, "tool": tc.function.name,
                               "args": tc.function.arguments[:2000], "result": out[:2000]})
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": out + _budget_note(ncalls, max_tool_calls)})
+            for tc in skip:
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": "Not executed." + _budget_note(ncalls, max_tool_calls)})
+            if max_tool_calls and ncalls >= max_tool_calls:
+                budget_hit = True
+                break
         if not final:
             final, usage, same = await _force_final(client, item, trace, messages, ctx_full,
                                                     max_tokens)
@@ -190,7 +219,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     prompt_tokens, final_ctx, interaction = context_lengths(usages)
     return ep.finish_row(row, t0, response=final, completion_tokens=spent, rounds=rounds,
                          tool_calls=ncalls, tool_trace=trace, forced_final=forced,
-                         context_full=ctx_full, prompt_tokens=prompt_tokens,
+                         tool_budget_hit=budget_hit, context_full=ctx_full, prompt_tokens=prompt_tokens,
                          final_context_tokens=final_ctx, interaction_tokens=interaction,
                          error=err)
 

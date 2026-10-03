@@ -42,17 +42,26 @@ a 401 several minutes into a run.
 
 ## The agentic loop
 
-With tools, the model is driven until it stops calling them. There is **no round cap and
-no total generation budget** — each request carries the suite-wide `max_tokens` of
-131,072, and beyond that the only ceilings are the server's context window and the model
-deciding it is done. Items legitimately run past 100 rounds; the deepest observed in the
-reference run was 491 rounds. (The reference run sent no `max_tokens` at all. A server
+With tools, the model is driven until it stops calling them or has used its **tool-call
+budget of 1024 calls** (`--max-tool-calls N`; 0 = uncapped). Every tool result ends with
+the budget line — `[tool budget: 37 of 1024 tool calls used, 987 remaining]` — so the
+model always knows what it has left. Calls past the budget are answered "Not executed"
+instead of running, and the item goes to the forced final below; `tool_budget_hit` is
+recorded on the row. There is no round cap and no total generation budget — each request
+carries the suite-wide `max_tokens` of 131,072, and beyond that the ceilings are the tool
+budget, the server's context window and the model deciding it is done. Items legitimately
+run past 100 rounds; the deepest observed in the reference run was 491 rounds.
+
+The tool budget exists because the uncapped loop has no other end. In the October 2026
+GLM-5.3 runs the most tool-hungry correct item used 485 calls, while one fp4 item looped
+for about 9,000 rounds until it was stopped by hand. 1024 leaves twice the largest
+correct item's room. (The reference run sent no `max_tokens` at all. A server
 that refuses prompt + `max_tokens` over the window now reports the context full about
 131k tokens earlier, which goes to the forced final below.) `--gen-budget N` caps the
 completion tokens summed over the loop; `--max-tokens 0` drops the per-request cap.
 
-Both caps were removed because they silently produced empty answers rather than shorter
-ones: under an earlier 40-round cap, all 15 items that hit it returned nothing at all,
+The round cap and generation budget are off by default because they silently produced empty
+answers rather than shorter ones: under an earlier 40-round cap, all 15 items that hit it returned nothing at all,
 because the code took the last assistant turn and on a tool-calling turn that is empty.
 An item must never end without an answer merely because it ran long, so:
 

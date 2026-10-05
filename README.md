@@ -7,7 +7,7 @@ step that combines them into a single number.
 |---|---|---|---|
 | `bfcl/` | 500 tasks | machine (`bfcl-eval`, AST + state) | function / tool calling |
 | `hle/` | 250 questions | LLM judge | frontier reasoning (Humanity's Last Exam) |
-| `aalcr/` | 100 questions | LLM judge (dataset's v1.1 prompts) | long-context reasoning (AA-LCR) |
+| `aalcr/` | 100 questions × 5 (avg@5) | LLM judge (dataset's v1.1 prompts) | long-context reasoning (AA-LCR) |
 
 The index is the **equally-weighted mean of the three accuracies**. Each client is
 self-contained: it takes `--endpoint` and `--model`, writes one timestamped results
@@ -17,12 +17,12 @@ Two long-context probes sit alongside the index. They are **not** averaged into 
 
 | Probe | Size | Grading | What it measures |
 |---|---|---|---|
-| `counting_stars/` | 2 langs × 15 lengths (64k–960k) × 5 samples | machine (needle scores) | multi-needle recall with corrections, EN + ZH |
+| `counting_stars/` | 2 langs × 15 lengths (64k–960k) × 10 samples (avg@10) | machine (needle scores) | multi-needle recall with corrections, EN + ZH |
 | `babilong_qa3/` | 4 lengths (0k/128k/256k/384k) × 100 | machine (BABILong match) | three-fact reasoning over a long haystack |
 
 They exist because they move when the serving stack changes. Weight and KV-cache
-quantizations that leave the three index components flat can still cost 10–15 points on
-qa3 at 256k. `synthesis.py` prints them in a separate section and leaves the composite
+quantizations that leave the three index components flat can still cost qa3 accuracy at
+long context. `synthesis.py` prints them in a separate section and leaves the composite
 alone, so it stays comparable with the reference numbers below.
 
 ```
@@ -40,6 +40,11 @@ eai-bench/
 
 Point every client at the same endpoint. Nothing here starts or stops a server; on a
 shared GPU box, launch one through `gpu-run` first (see `serving/`).
+
+Sampling is temperature 0.6 / top_p 0.95 in hle, aalcr, counting_stars and babilong_qa3
+(`endpoint.DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P`); bfcl keeps bfcl-eval's own 0.001.
+Results from before 2026-10-05 used temperature 1.0 / top_p 0.95; each run's
+`config.json` records its sampling.
 
 ```bash
 EP=http://127.0.0.1:30000/v1
@@ -115,6 +120,14 @@ as complete and was never retried — rows had to be deleted by hand from a 21 M
 file to get those items to run. A resume now rewrites `responses.jsonl` once, before any
 worker starts, keeping the good rows and banking the rest in `failures.jsonl`.
 
+A reasoning model can also finish cleanly with nothing but reasoning: it runs to
+`max_tokens` with empty content. That is the model's answer, not an error, and
+resampling it would inflate the score. So `endpoint.finish_row` writes
+`NO ANSWER: output limit exceeded before a final answer was produced.` (or
+`NO ANSWER: the model returned an empty response.` below the cap) as the response and
+sets `no_answer` to `output_limit` / `empty`. The row counts as done, a resume keeps it,
+and every grader scores it wrong.
+
 A resume also compares `endpoint`, `model`, `mode` and subset size against `config.json`
 and **aborts if they changed**, rather than blending two endpoints into one result set.
 `--force` proceeds and appends the change to `config_history`, so the artifact records
@@ -139,69 +152,30 @@ counted as a spurious incorrect had it not been spotted by hand.
 
 ## Reference numbers
 
-### GLM-5.3 BF16, current suite
-
 GLM-5.3 BF16 weights with a BF16 KV cache, under sglang on 4 GB300 trays (16 GPUs, TP16),
-October 2026. Every component ran in full at the 131,072-token cap. Accuracy SE is
-binomial over the whole subset; Counting-Stars SE is over its 30 (language, length)
-cells. Median-interaction SE is a 2000-resample bootstrap over the items that have a
-count (`compare/eai_stats.py` in workspace-needle).
+October 2026, at the 131,072-token cap. HLE, AA-LCR, Counting-Stars and qa3 sample at
+temperature 0.6 / top_p 0.95 (run of 2026-10-05). BFCL samples at bfcl-eval's own 0.001 and
+is the run of 2026-10-01. Accuracy SE is binomial over the subset, except AA-LCR (over the
+100 per-question means of avg@5) and Counting-Stars (over its 30 language x length cells).
+Median-interaction SE is a 2000-resample bootstrap over the items that produced an answer
+(`compare/eai_stats.py` in workspace-needle).
 
 | Component | Accuracy | Median interaction (tokens) |
 |---|---|---|
 | BFCL-500 | 374/500 = 74.80 ± 1.94% | 195 ± 7 |
-| HLE-250 with tools | 131/250 = 52.40 ± 3.16% | 22,839 ± 2,764 |
-| AA-LCR-100 (v1.1) | 78/100 = 78.00 ± 4.14% | 2,198 ± 462 (n=99) |
-| **Composite** | **68.40 / 100** | |
-| Counting-Stars (probe) | 137.53/150 = 91.69 ± 1.21% | 1,948 ± 92 |
-| BABILong qa3 (probe) | 220/400 = 55.00 ± 2.49% | 22,316 ± 2,114 (n=373) |
+| HLE-250 with tools | pending | |
+| AA-LCR-100 (v1.1), avg@5 | 365/500 = 73.00 ± 3.67% | 1,727 ± 132 (n=456) |
+| **Composite** | pending (needs HLE) | |
+| Counting-Stars (probe), avg@10 | pending | |
+| BABILong qa3 (probe) | pending | |
 
-The qa3 split by length is 0k 100/100, 128k 51/100, 256k 40/100 and 384k 29/100. qa3
-uses the clarified question (see `babilong_qa3/README.md`), so it is not comparable with
-the 256k reference rows measured with the upstream question.
-
-Answers that hit the cap are empty and count as wrong. They stay in the accuracy
-denominator but have no interaction count: 1 AA-LCR item and 27 qa3 items. Errors and
-dropped streams from server load were retried until every item had a response. BFCL
-multi-turn retries start from clean environments (see `bfcl/README.md`).
-
-The same suite against two quantized serving stacks, each on 2 trays (8 GPUs):
-
-| Component | MXFP4 (MR-GPTQ v2) / BF16 KV | MXFP4 (MR-GPTQ v2) / FP8 KV (FlashMLA, per-128 scaled) |
-|---|---|---|
-| BFCL-500 | 77.00 ± 1.88% · 198 ± 10 | 75.00 ± 1.94% · 198 ± 11 |
-| HLE-250 with tools | 47.20 ± 3.16% · 16,874 ± 2,213 | 54.80 ± 3.15% · 19,946 ± 4,047 |
-| AA-LCR-100 | 80.00 ± 4.00% · 2,544 ± 477 | 80.00 ± 4.00% · 2,478 ± 411 |
-| **Composite** | **68.07** | **69.93** |
-| Counting-Stars | 91.15 ± 1.47% · 2,072 ± 158 | 91.25 ± 1.25% · 1,911 ± 101 |
-| BABILong qa3 | 56.50 ± 2.48% · 20,921 ± 2,360 | 60.00 ± 2.45% · 21,763 ± 2,748 |
-
-Each cell is accuracy · median interaction tokens. On the MXFP4 / BF16 KV run, one HLE
-item went into a runaway tool loop: about 9,000 rounds, with the context growing from
-81k to 272k tokens. It was stopped by hand and scored wrong, so that run's HLE is
-`complete: false`. The BF16 run solved the same item in 37 rounds. One Counting-Stars
-answer on that run (EN-640k) hit the cap. No difference from BF16 exceeds 1.5 combined
-standard errors.
-
-### Legacy eai-v1.0 run
+On AA-LCR, 44 of the 500 samples (8.8%) reasoned until the cap without a final answer.
+They are written as `NO ANSWER: output limit exceeded ...` (see Resuming) and count as
+wrong. At temperature 1.0 the same server ran past the cap on 1 of 100 questions.
 
 `tools/import_legacy.py` converts the original `eai-v1.0` run into four dated result
-directories, which is also the regression test for this repo — the numbers must come
-back unchanged:
-
-| Component | Result |
-|---|---|
-| BFCL-500 | 373/500 = 74.60% |
-| HLE-250 with tools | 114/250 = 45.60% |
-| AA-LCR-25 (legacy 25-question subset, v1.0 keys) | 20/25 = 80.00% |
-| **Composite** | **66.73 / 100** |
-| HLE-250 no tools (reference) | 89/250 = 35.60% |
-
-Those were measured against GLM-5.3 on 8×B200 under sglang. The no-tools pass is
-depressed by a since-removed generation cap: 36 of 250 items truncated to empty answers
-and all 36 scored zero. GLM-5.3's published 62.5 is **HLE with tools** — never compare
-it against the no-tools figure, and note that 45.60% uses a keyless DuckDuckGo
-`web_search` and a single repeat, so it is not like-for-like either.
+directories, which is also the regression test for this repo: the imported scores must
+come back unchanged.
 
 `tools/selftest.py` checks the resume rule, the config guard and the grading round-trip
 offline, without an endpoint. Run it after touching `resultdir.py`.

@@ -37,7 +37,7 @@ LENGTHS = tuple(f"{64 * i}k" for i in range(1, 16))  # 64k .. 960k
 # prompt. A single 32-needle prompt is a noisy measurement -- a single prompt's score moved by
 # up to 0.3 between endpoints whose overall means agreed -- so the standard run samples every
 # prompt this many times, independently, at the client's sampling temperature.
-N_SAMPLES = 5
+N_SAMPLES = 10  # avg@10; runs before 2026-10-05 used 5
 
 UPSTREAM = ("https://raw.githubusercontent.com/nick7nlp/Counting-Stars/"
             "32e16f2c2d2be9f38d710e782236315e0821a038/context_data")

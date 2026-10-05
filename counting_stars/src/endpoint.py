@@ -4,9 +4,10 @@ This file is vendored byte-identically into every client that sends requests. Ea
 client is meant to be copyable on its own, so the duplication is deliberate: there is no
 shared top-level package to install or keep in sync.
 
-Sampling defaults follow the Endpoint Accuracy Index methodology, which says to use the
-lab's own recommendation: GLM-5.3's generation_config.json gives temperature 1.0 /
-top_p 0.95. Reasoning effort is never sent, so the chat template's default applies.
+Sampling defaults are temperature 0.6 / top_p 0.95 (bfcl keeps upstream bfcl-eval's own).
+The suite previously used GLM-5.3's generation_config.json (temperature 1.0 / top_p 0.95);
+results from before the change record their sampling in config.json. Reasoning effort is
+never sent, so the chat template's default applies.
 """
 
 import asyncio
@@ -15,7 +16,7 @@ import os
 import random
 import time
 
-DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TEMPERATURE = 0.6
 DEFAULT_TOP_P = 0.95
 # Every request in every component asks for at most this many tokens, so all five
 # measure the endpoint under one generation budget. 128k is past the reasoning tail of
@@ -167,8 +168,22 @@ def timed_row(item, drop=("prompt",)):
     return row, time.time()
 
 
+# A request that ends without an error but with no answer content -- in practice a
+# reasoning runaway that hit the token budget -- is a wrong answer, not a failure. The
+# row gets an explicit marker as its response, so a resume (which re-runs rows without a
+# usable answer) does not resample it, and graders score it like any other wrong answer.
+# The markers contain no brackets or digits, so no answer parser can read a value out.
+NO_ANSWER_LIMIT = "NO ANSWER: output limit exceeded before a final answer was produced."
+NO_ANSWER_EMPTY = "NO ANSWER: the model returned an empty response."
+
+
 def finish_row(row, t0, **fields):
     row.update(fields)
+    if not row.get("error") and not (row.get("response") or "").strip():
+        cap, used = row.get("max_tokens"), row.get("interaction_tokens") or 0
+        hit = row.get("finish_reason") == "length" or bool(cap and used >= cap)
+        row["no_answer"] = "output_limit" if hit else "empty"
+        row["response"] = NO_ANSWER_LIMIT if hit else NO_ANSWER_EMPTY
     row["latency_s"] = round(time.time() - t0, 2)
     return row
 

@@ -11,6 +11,13 @@ deterministic subset instead — sort by `(document_category, document_set_id, q
 and stride evenly, which spreads a sample across all seven document categories instead of
 clustering on the 63-question Company set. `collect` reports the per-category breakdown.
 
+Each question is asked **5 times** (`--n-samples`, default 5) and the score is **avg@5**:
+the mean over all 500 graded samples. Samples of one question are not independent, so
+`accuracy_se` in `score.json` is taken over the 100 per-question means. A sample's id is
+`<set>#<question>@<k>`; the five samples of a question run back to back with one prompt, so
+the server's prefix cache prefills the documents once. Runs from before avg@5 have one
+sample per question and bare `<set>#<question>` ids; they resume and score as before.
+
 ## Running
 
 ```bash
@@ -22,8 +29,8 @@ The dataset is public (Apache-2.0) and fetched into `aalcr/data/` on first run �
 plus a zip of extracted document text, about 17 MB, git-ignored. Point `--data-dir` at an
 existing copy to skip the download.
 
-`--concurrency` defaults to **0**, which means the whole subset at once — all 100 items
-with the default `--n-subset`. Each prompt is hundreds of thousands of tokens, so the server's
+`--concurrency` defaults to **0**, which means the whole subset at once — all 500 samples
+with the defaults. Each prompt is hundreds of thousands of tokens, so the server's
 prefill queue, not this flag, is what actually paces the run; set a positive value to
 bound it. The resolved number (not the sentinel) is what lands in `config.json`.
 `--max-tokens` defaults to 131,072, the per-request budget every component uses. The answer

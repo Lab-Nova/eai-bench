@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AA-LCR benchmark client (long-context reasoning; all 100 questions by default).
+"""AA-LCR benchmark client (long-context reasoning; all 100 questions x 5 samples, avg@5).
 
     run     --endpoint URL --model NAME [--results-dir DIR] [--data-dir DIR]
     pending --results-dir DIR          ids with a response and no grade yet
@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -108,7 +109,8 @@ def cmd_run(a):
             raise SystemExit(f"{rd.path} has no subset.json -- it is not a run directory")
         items = dataset.rebuild_prompts(data_dir, subset_rows)
     else:
-        items = dataset.load_subset(data_dir, n_subset=a.n_subset, limit=a.limit)
+        items = dataset.load_subset(data_dir, n_subset=a.n_subset, n_samples=a.n_samples,
+                                    limit=a.limit)
         rd = ResultDir.start(RESULTS_BASE)
         rd.write_subset(items)
 
@@ -121,7 +123,9 @@ def cmd_run(a):
         "component": COMPONENT, "mode": "single_turn",
         "endpoint": a.endpoint, "model": a.model,
         "temperature": a.temperature, "top_p": a.top_p,
-        "n_subset": len(items), "concurrency": concurrency,
+        "n_subset": len({it.get("question_key") or it["id"] for it in items}),
+        "n_samples": max(1, len({it.get("sample") for it in items})),
+        "concurrency": concurrency,
         "max_tokens": a.max_tokens, "context_len": a.context_len,
         "started_at": rd.config.get("started_at") or resultdir.now_stamp(),
     }
@@ -207,7 +211,20 @@ def cmd_collect(a):
         c = by_cat.setdefault(cat, {"correct": 0, "total": 0})
         c["correct"] += int(bool(g.get("correct")))
         c["total"] += 1
-    score = rd.collect(COMPONENT, extra={"by_category": by_cat})
+    # accuracy over every sample is avg@k. Samples of one question are not independent
+    # of each other, so the standard error is taken over the per-question means; an
+    # ungraded sample counts 0, as in `accuracy`.
+    grades = rd.read_grades()
+    per_q = {}
+    for sid, item in subset.items():
+        per_q.setdefault(item.get("question_key") or sid, []).append(
+            int(bool((grades.get(sid) or {}).get("correct"))))
+    q_means = [sum(v) / len(v) for v in per_q.values()]
+    se = statistics.stdev(q_means) / len(q_means) ** 0.5 if len(q_means) > 1 else 0.0
+    score = rd.collect(COMPONENT, extra={
+        "by_category": by_cat, "questions": len(per_q),
+        "n_samples": max(len(v) for v in per_q.values()) if per_q else 0,
+        "accuracy_se": round(se, 6)})
     print(json.dumps(score, indent=2))
     if not score["complete"]:
         print(f"\nWARNING: {score['total'] - score['graded']} of {score['total']} items are "
@@ -226,6 +243,9 @@ def main():
     r.add_argument("--results-dir", help="resume into this directory instead of creating one")
     r.add_argument("--data-dir", help=f"AA-LCR corpus location (default {DEFAULT_DATA_DIR})")
     r.add_argument("--n-subset", type=int, default=dataset.N_SUBSET)
+    r.add_argument("--n-samples", type=int, default=dataset.N_SAMPLES,
+                   help="independent samples of each question, scored avg@k "
+                        "(default %(default)s)")
     r.add_argument("--limit", type=int, help="only run the first N of the subset (smoke test)")
     r.add_argument("--concurrency", type=int, default=0,
                    help="in-flight items; 0 (the default) means the whole subset at once")

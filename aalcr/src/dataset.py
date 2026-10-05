@@ -9,6 +9,11 @@ All 100 questions run by default. `--n-subset N` takes a deterministic, RNG-free
 them: sort by (document_category, document_set_id, question_id) and stride evenly
 through that order, which spreads a sample across all seven document categories
 instead of clustering on the 63-question Company set.
+
+Each question is asked N_SAMPLES times, independently, at the client's sampling
+temperature, and scored avg@N_SAMPLES. A sample's id is `<set>#<question>@<k>`; the
+samples of one question sit next to each other and share one prompt, so the server's
+prefix cache serves the documents once per question.
 """
 
 import csv
@@ -18,6 +23,7 @@ import urllib.request
 import zipfile
 
 N_SUBSET = 100
+N_SAMPLES = 5
 REPO = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main"
 FILES = ("AA-LCR_Dataset.csv", "AA-LCR_extracted-text.zip")
 # Where each file sits in the HF repo: the zip is under extracted_text/, not the root.
@@ -133,11 +139,26 @@ def find_doc(base, category, set_id, filename):
     return os.path.join(d, hit)
 
 
-def build_items(data_dir, rows):
-    """Turn CSV rows into items, reading and concatenating each question's documents."""
+def question_key(r):
+    return f"{r['document_set_id']}#{r['question_id']}"
+
+
+def build_items(data_dir, rows, samples=None):
+    """Turn CSV rows into items, reading and concatenating each question's documents.
+
+    `samples[i]` is the sample index of rows[i]; None (a run from before avg@k) keeps
+    the bare question key as the id.
+    """
     base = ensure_extracted(data_dir)
     items = []
-    for r in rows:
+    prompts = {}
+    for n, r in enumerate(rows):
+        key = question_key(r)
+        k = samples[n] if samples else None
+        if key in prompts:  # a later sample of the same question: reuse the text
+            items.append({**prompts[key], "id": key if k is None else f"{key}@{k}",
+                          "sample": k})
+            continue
         docs = []
         for fn in r["data_source_filenames"]:
             with open(find_doc(base, r["document_category"], r["document_set_id"], fn),
@@ -146,8 +167,8 @@ def build_items(data_dir, rows):
         documents_text = "\n\n".join(
             f"BEGIN DOCUMENT {i + 1}:\n{doc}\nEND DOCUMENT {i + 1}"
             for i, doc in enumerate(docs))
-        items.append({
-            "id": f"{r['document_set_id']}#{r['question_id']}",
+        prompts[key] = {
+            "question_key": key,
             "document_category": r["document_category"],
             "document_set_id": r["document_set_id"],
             "question_id": r["question_id"],
@@ -157,11 +178,13 @@ def build_items(data_dir, rows):
             "data_source_filenames": r["data_source_filenames"],
             "prompt": PROMPT_TEMPLATE.format(documents_text=documents_text,
                                              question=r["question"]),
-        })
+        }
+        items.append({**prompts[key], "id": key if k is None else f"{key}@{k}",
+                      "sample": k})
     return items
 
 
-def load_subset(data_dir, n_subset=N_SUBSET, limit=None):
+def load_subset(data_dir, n_subset=N_SUBSET, n_samples=N_SAMPLES, limit=None):
     ensure_data(data_dir)
     rows = load_rows(data_dir)
     subset = pick_subset(rows, n_subset)
@@ -171,7 +194,8 @@ def load_subset(data_dir, n_subset=N_SUBSET, limit=None):
     print(f"selected {len(subset)} of {len(rows)}; categories: {counts}", flush=True)
     if limit:
         subset = subset[:limit]
-    return build_items(data_dir, subset)
+    rows = [r for r in subset for _ in range(n_samples)]
+    return build_items(data_dir, rows, [k for _ in subset for k in range(n_samples)])
 
 
 def rebuild_prompts(data_dir, subset_rows):
@@ -181,11 +205,13 @@ def rebuild_prompts(data_dir, subset_rows):
     resume rebuilds the prompts from the local corpus rather than storing them twice.
     """
     ensure_data(data_dir)
-    by_id = {f"{r['document_set_id']}#{r['question_id']}": r for r in load_rows(data_dir)}
+    by_key = {question_key(r): r for r in load_rows(data_dir)}
     rows = []
     for s in subset_rows:
-        r = by_id.get(str(s["id"]))
+        key = str(s.get("question_key") or s["id"])
+        r = by_key.get(key)
         if r is None:
             raise SystemExit(f"subset id {s['id']!r} is not in the AA-LCR CSV at {data_dir}")
         rows.append(r)
-    return build_items(data_dir, rows)
+    samples = [s.get("sample") for s in subset_rows]
+    return build_items(data_dir, rows, samples if any(k is not None for k in samples) else None)

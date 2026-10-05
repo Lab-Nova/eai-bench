@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Counting-Stars client (long-context multi-needle correction test, EN + ZH, 64k-960k).
 
-The standard run is 2 languages x 15 lengths x 5 samples = 150 requests.
+The standard run is 2 languages x 15 lengths x 10 samples = 300 requests (avg@10).
 
     run      --endpoint URL --model NAME [--results-dir DIR] [--data-dir DIR]
     generate [--data-dir DIR]            build and cache the prompts, no endpoint
@@ -47,7 +47,7 @@ CONTEXT_MARGIN = 16
 # in the original Counting-Stars runner.
 TEMPLATE_MARGIN = 512
 _INPUT_TOKENS_RE = re.compile(r"(\d+) tokens from the input messages")
-# 150 requests of up to a million tokens each: the server's KV pool, not this flag, is
+# 300 requests of up to a million tokens each: the server's KV pool, not this flag, is
 # the real limit, and far past it extra requests only queue prefills behind each other.
 DEFAULT_CONCURRENCY = 16
 

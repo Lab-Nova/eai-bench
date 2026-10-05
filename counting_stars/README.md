@@ -13,11 +13,12 @@ not enough. The model has to keep the corrected count and drop the wrong one, at
 depth of the context. On GLM-5.3 this separated quantizations that single-needle tests
 rate identically.
 
-The standard run is **2 languages × 15 lengths × 5 samples = 150 requests**. Upstream
+The standard run is **2 languages × 15 lengths × 10 samples = 300 requests** (avg@10). Upstream
 has one star set per needle count, so each (language, length) has exactly one prompt. A
 sample is an independent request for that same prompt at the client's sampling
 temperature. A single 32-needle prompt is noisy: one cell moved by up to 0.3 between
-endpoints whose overall means agreed. That noise is why there are five samples per cell.
+endpoints whose overall means agreed. That noise is why there are ten samples per cell
+(five before 2026-10-05).
 
 ## Running
 
@@ -58,7 +59,7 @@ entries and de-duplicated. Each needle then scores:
 
 An item's score is the mean over its 32 needles. `accuracy` in `score.json` is the mean
 item score. `accuracy_se` is the standard error over the 30 (language, length) cell
-means: samples of one prompt are not independent, so the error is not taken over 150
+means: samples of one prompt are not independent, so the error is not taken over 300
 requests. `score.json` also carries `by_lang`, `by_length` and needle totals. An item
 with no answer scores 0 and stays in the denominator.
 
@@ -83,26 +84,8 @@ which is git-ignored. Built prompts are cached there too, about 60 MB for all 30
 
 ## Reference numbers
 
-GLM-5.3 at 1 sample per cell (30 prompts), EN+ZH mean ± SE over prompts:
-
-| Weights / KV cache | Score |
-|---|---|
-| BF16 / BF16 | 0.914 ± 0.015 |
-| FP8 / BF16 | 0.939 ± 0.011 |
-| FP8 / FP8 (FlashMLA, per-128 scaled) | 0.930 ± 0.011 |
-| MXFP4 (MR-GPTQ v2) / BF16 | 0.944 ± 0.012 |
-| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 0.923 ± 0.015 |
-
-Current suite (5 samples per cell, 150 requests, `max_tokens` 131072), October 2026,
-mean ± SE over the 30 cells, with the median interaction tokens ± bootstrap SE:
-
-| Weights / KV cache | Score | Median interaction |
-|---|---|---|
-| BF16 / BF16 | 0.917 ± 0.012 | 1,948 ± 92 |
-| MXFP4 (MR-GPTQ v2) / BF16 | 0.911 ± 0.015 | 2,072 ± 158 |
-| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 0.913 ± 0.013 | 1,911 ± 101 |
-
-One MXFP4 / BF16 answer (EN-640k) hit the cap and scored 0.
+GLM-5.3 BF16 weights / BF16 KV cache, 10 samples per cell (300 requests), temperature 0.6 /
+top_p 0.95, `max_tokens` 131072, October 2026, mean ± SE over the 30 cells: pending.
 
 ## Files
 

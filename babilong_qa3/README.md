@@ -10,9 +10,8 @@ was *before* a given room:
 
 To answer, the model has to find and chain three facts: who took the item, where they
 went, and where they went next. On GLM-5.3 this was the BABILong task that separated
-quantizations best. At 256k, FP4 weights with a poor recipe and a plain e4m3 KV cache
-each lost about 15 points against BF16. qa1 moved 5 to 8 points, and qa5 and qa9 stayed
-within noise. 0k is the no-haystack control.
+quantizations best (weight recipe and KV-cache scaling); qa1, qa5 and qa9 moved less.
+0k is the no-haystack control.
 
 ## Running
 
@@ -81,31 +80,8 @@ after dropping rooms the question itself names. Naming two rooms is wrong.
 
 ## Reference numbers
 
-GLM-5.3, 100 samples, 256k, `max_tokens` 131072, measured with the upstream question
-(before the rewrite above):
-
-| Weights / KV cache | qa3 256k |
-|---|---|
-| BF16 / BF16 | 51% |
-| FP8 / BF16 | 46% |
-| MXFP4 (MR-GPTQ v1) / BF16 | 37% |
-| MXFP4 (MR-GPTQ v2) / BF16 | 51% |
-| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 47% |
-| MXFP4 (MR-GPTQ v2) / FP8 (plain e4m3, trtllm) | 36% |
-
-Paired differences on the same 100 items have an SE of about 6 points, so a gap under
-about 12 points is within noise.
-
-With the clarified question, all 400 samples, `max_tokens` 131072, October 2026:
-
-| Weights / KV cache | 0k | 128k | 256k | 384k | All 400 | Median interaction |
-|---|---|---|---|---|---|---|
-| BF16 / BF16 | 100 | 51 | 40 | 29 | 55.0 ± 2.5% | 22,316 ± 2,114 |
-| MXFP4 (MR-GPTQ v2) / BF16 | 100 | 55 | 38 | 33 | 56.5 ± 2.5% | 20,921 ± 2,360 |
-| MXFP4 (MR-GPTQ v2) / FP8 (FlashMLA, per-128 scaled) | 100 | 50 | 51 | 39 | 60.0 ± 2.5% | 21,763 ± 2,748 |
-
-On each endpoint, 27 answers ran past the cap and scored wrong. The median interaction
-is taken over the 373 that finished.
+GLM-5.3 BF16 weights / BF16 KV cache, all 400 samples, clarified question, temperature 0.6 /
+top_p 0.95, `max_tokens` 131072, October 2026: pending.
 
 ## Files
 

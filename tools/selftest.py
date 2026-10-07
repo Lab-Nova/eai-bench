@@ -457,6 +457,132 @@ def test_interaction(tmp):
           and by.get("128k", {}).get("no_answer", {}).get("output_limit") == 2, f"got {by}")
 
 
+def test_ctxgate(tmp):
+    """The HLE context gate: the budget, oldest first, an oversized item, runner wiring."""
+    print("\nhle context gate: budget, priority, concurrency falling as contexts grow")
+    import asyncio
+    from types import SimpleNamespace as NS
+    import ctxgate
+    import runner
+
+    async def grow(gate, log):
+        slot = gate.slot()
+        try:
+            for r in range(1, 6):
+                await slot.acquire(10 * r)
+                log.append((r, gate.running, gate.held))
+                await asyncio.sleep(0.002)
+        finally:
+            slot.release()
+
+    async def four_growing():
+        gate, log = ctxgate.ContextGate(100), []
+        await asyncio.wait_for(asyncio.gather(*(grow(gate, log) for _ in range(4))), 10)
+        return gate, log
+
+    gate, log = asyncio.run(four_growing())
+    check("ctx gate: the summed context never exceeds the budget",
+          all(held <= 100 for _, _, held in log), f"got {log}")
+    check("ctx gate: concurrency falls as contexts grow",
+          max(n for r, n, _ in log if r == 1) == 4 and max(n for r, n, _ in log if r == 5) <= 2,
+          f"got {log}")
+    check("ctx gate: every item finishes and the gate drains",
+          sum(1 for r, _, _ in log if r == 5) == 4 and (gate.held, gate.running) == (0, 0)
+          and gate.pauses > 0, f"got {gate.__dict__}")
+
+    async def oldest_first():
+        gate, events = ctxgate.ContextGate(100), []
+        a, b, c = gate.slot(), gate.slot(), gate.slot()
+        await a.acquire(50)
+        await b.acquire(40)
+
+        async def apply(slot, name, need):
+            await slot.acquire(need)
+            events.append(name)
+
+        ta = asyncio.create_task(apply(a, "a", 90))  # the oldest grows past what is free
+        tc = asyncio.create_task(apply(c, "c", 5))   # the youngest would fit beside b
+        await asyncio.sleep(0.01)
+        blocked = (list(events), gate.held)
+        tb = asyncio.create_task(apply(b, "b", 45))  # b re-applies, so it pauses
+        await asyncio.sleep(0.01)
+        mid = list(events)
+        a.release()
+        await asyncio.wait_for(asyncio.gather(ta, tb, tc), 1)
+        b.release()
+        c.release()
+        return blocked, mid, events, gate.held
+
+    blocked, mid, events, held = asyncio.run(oldest_first())
+    check("ctx gate: a younger item waits behind a blocked older one", blocked == ([], 40),
+          f"got {blocked}")
+    check("ctx gate: a pausing item makes room for the older one; the rest follow by age",
+          mid == ["a"] and events == ["a", "b", "c"] and held == 0,
+          f"got {mid} then {events}, held {held}")
+
+    async def oversized():
+        gate = ctxgate.ContextGate(100)
+        a, big = gate.slot(), gate.slot()
+        await a.acquire(60)
+        t = asyncio.create_task(big.acquire(500))
+        await asyncio.sleep(0.01)
+        waited = not t.done()
+        a.release()
+        await asyncio.wait_for(t, 1)
+        alone = (gate.running, gate.held) == (1, 500)
+        big.release()
+        return waited, alone
+
+    check("ctx gate: an item over the budget waits for the others, then runs alone",
+          asyncio.run(oversized()) == (True, True))
+
+    async def cancelled():
+        gate = ctxgate.ContextGate(100)
+        a, b, c = gate.slot(), gate.slot(), gate.slot()
+        await a.acquire(80)
+        tb = asyncio.create_task(b.acquire(50))
+        tc = asyncio.create_task(c.acquire(10))
+        await asyncio.sleep(0.01)
+        waiting = not tc.done()
+        tb.cancel()
+        await asyncio.sleep(0.01)
+        return waiting, tc.done(), gate.held
+
+    check("ctx gate: a cancelled waiter steps aside", asyncio.run(cancelled()) == (True, True, 90))
+
+    class Slow:
+        """Round 1 calls a tool, round 2 answers; every request takes 50 ms."""
+        def __init__(self):
+            self.n = 0
+
+        async def create(self, messages, **kw):
+            self.n += 1
+            n = self.n
+            await asyncio.sleep(0.05)
+            usage = NS(completion_tokens=50, model_dump=lambda: {"prompt_tokens": 100 * n,
+                                                                 "completion_tokens": 50})
+            calls = [NS(id="c1", function=NS(name="nope", arguments="{}"))] if n == 1 else None
+            msg = NS(content=None if n == 1 else "42", tool_calls=calls)
+            return NS(choices=[NS(message=msg)], usage=usage)
+
+    async def wired():
+        gate = ctxgate.ContextGate(200)
+        rows = await asyncio.wait_for(asyncio.gather(
+            runner.run_with_tools(Slow(), {"id": "p", "prompt": "q"}, ctx_gate=gate),
+            runner.run_with_tools(Slow(), {"id": "q", "prompt": "q"}, ctx_gate=gate)), 10)
+        return gate, rows
+
+    gate, rows = asyncio.run(wired())
+    check("hle: gated items both answer, one pausing while the other's context is held",
+          [r.get("response") for r in rows] == ["42", "42"] and gate.pauses >= 1
+          and any(r.get("ctx_pause_s", 0) > 0 for r in rows), f"got {rows}, {gate.__dict__}")
+    check("hle: a finished gated run leaves nothing held",
+          (gate.held, gate.running) == (0, 0), f"got {gate.__dict__}")
+    row = asyncio.run(runner.run_with_tools(Slow(), {"id": "u", "prompt": "q"}))
+    check("hle: an ungated row carries no ctx_pause_s",
+          row.get("response") == "42" and "ctx_pause_s" not in row, f"got {row}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="eai-selftest-")
     try:
@@ -466,6 +592,7 @@ def main():
         test_counting_stars(tmp)
         test_babilong_qa3(tmp)
         test_interaction(tmp)
+        test_ctxgate(tmp)
         test_imported_roundtrip()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -71,6 +71,7 @@ def cmd_run(a):
         "endpoint": a.endpoint, "model": a.model,
         "temperature": a.temperature, "top_p": a.top_p,
         "n_subset": len(items), "concurrency": a.concurrency,
+        "max_conc_context": a.max_conc_context,
         "max_tokens": a.max_tokens, "gen_budget": a.gen_budget, "max_rounds": a.max_rounds,
         "max_tool_calls": a.max_tool_calls,
         "started_at": rd.config.get("started_at") or __import__("resultdir").now_stamp(),
@@ -92,7 +93,8 @@ def cmd_run(a):
     todo = [it for it in items if it["id"] not in done_ids]
     print(f"results dir : {rd.path}\n"
           f"mode        : {mode}\n"
-          f"{len(done_ids)} already done, {len(todo)} to run, concurrency={a.concurrency}",
+          f"{len(done_ids)} already done, {len(todo)} to run, concurrency={a.concurrency}"
+          + (f", max-conc-context={a.max_conc_context}" if a.max_conc_context else ""),
           flush=True)
     if not todo:
         print("nothing to do; run `collect` once the grades are in.")
@@ -100,11 +102,17 @@ def cmd_run(a):
 
     client = ep.Endpoint(cfg["endpoint"], cfg["model"],
                          temperature=cfg["temperature"], top_p=cfg["top_p"])
+    gate = None
+    if with_tools and a.max_conc_context:
+        import ctxgate
+        gate = ctxgate.ContextGate(a.max_conc_context)
+    elif a.max_conc_context:
+        print("--max-conc-context applies to the tools mode only; ignored", flush=True)
     if with_tools:
         def work(it):
             return runner.run_with_tools(client, it, max_rounds=a.max_rounds,
                                          gen_budget=a.gen_budget, max_tokens=a.max_tokens,
-                                         max_tool_calls=a.max_tool_calls)
+                                         max_tool_calls=a.max_tool_calls, ctx_gate=gate)
     else:
         def work(it):
             return runner.run_no_tools(client, it, max_tokens=a.max_tokens)
@@ -117,6 +125,9 @@ def cmd_run(a):
         if with_tools:
             import tools
             tools.shutdown()
+        if gate:
+            print(f"ctx gate: {gate.pauses} pause(s), peak {gate.peak / 1e3:.0f}k of "
+                  f"{gate.budget / 1e3:.0f}k tokens held", flush=True)
 
     rows = rd.rows_by_id()
     ok = sum(1 for it in items if is_done(rows.get(it["id"]) or {}))
@@ -236,6 +247,11 @@ def main():
                    help="in-flight items; most of an item's wall-clock is local tool "
                         "execution, not endpoint time, so this runs well above the "
                         "server's --max-running-requests")
+    r.add_argument("--max-conc-context", type=int, default=0,
+                   help="tools mode: token budget for the summed context of the running "
+                        "items; as conversations grow the youngest items pause, so "
+                        "concurrency falls. Set it below the server's KV pool, leaving room "
+                        "for output. 0 = off (default)")
     r.add_argument("--temperature", type=float, default=ep.DEFAULT_TEMPERATURE)
     r.add_argument("--top-p", type=float, default=ep.DEFAULT_TOP_P)
     r.add_argument("--max-tokens", type=int, default=runner.DEFAULT_MAX_TOKENS,

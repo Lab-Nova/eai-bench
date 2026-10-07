@@ -12,8 +12,10 @@ a digest of what the tools already found, and asks for the answer there.
 """
 
 import asyncio
+import json
 import re
 
+import ctxgate
 import endpoint as ep
 import tools as hle_tools
 from resultdir import context_lengths
@@ -87,13 +89,14 @@ def _digest(trace, limit=60000):
     return "".join(reversed(parts)) or "(no tool output was produced)"
 
 
-async def _force_final(client, item, trace, messages, ctx_full, max_tokens):
+async def _force_final(client, item, trace, messages, ctx_full, max_tokens, slot, ctx):
     """Make the model commit to an answer. Returns (answer, usage, same_conversation).
 
     While the conversation still fits we just append the instruction to it. Once the
     context is full that is impossible, so we rebuild a short conversation carrying the
     question plus a digest of the tool findings. A rebuilt conversation is a different
     context, so its usage says nothing about how far the item's own context grew.
+    `slot` and `ctx` are the item's context-gate slot and its conversation's size.
     """
     cap = {"max_tokens": max_tokens} if max_tokens else {}
     if not ctx_full:
@@ -102,6 +105,7 @@ async def _force_final(client, item, trace, messages, ctx_full, max_tokens):
             "content": "Stop using tools and give your final answer now, in the required "
                        "format, based on what you have already found.",
         }]
+        await slot.acquire(ctx + ctxgate.estimate_tokens(convo[-1]["content"]))
         for i_try in range(ep.DEFAULT_ATTEMPTS):
             try:
                 r = await client.create(convo, tool_choice="none", **cap)
@@ -117,6 +121,7 @@ async def _force_final(client, item, trace, messages, ctx_full, max_tokens):
               f"You already investigated this with tools. Their output was:\n\n"
               f"{_digest(trace)}\n\n"
               f"Give your final answer now, in the required format."}]
+    await slot.acquire(ctxgate.estimate_tokens(convo[0]["content"]))
     for i_try in range(ep.DEFAULT_ATTEMPTS):
         try:
             r = await client.create(convo, **cap)
@@ -133,13 +138,22 @@ def _usage(resp):
 
 
 async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
-                         max_tokens=DEFAULT_MAX_TOKENS, max_tool_calls=DEFAULT_MAX_TOOL_CALLS):
+                         max_tokens=DEFAULT_MAX_TOKENS, max_tool_calls=DEFAULT_MAX_TOOL_CALLS,
+                         ctx_gate=None):
     """The agentic loop.
 
     `max_tokens` caps each request; `gen_budget` caps completion tokens summed over the
     whole loop; `max_rounds` caps tool rounds; `max_tool_calls` caps executed tool calls.
-    0 means no cap for any of them.
+    0 means no cap for any of them. `ctx_gate`, a ctxgate.ContextGate shared by the
+    items of a run, pauses the item while its context does not fit the run's budget.
     """
+    slot = ctx_gate.slot() if ctx_gate else ctxgate.UNGATED
+    # The size of the conversation the next request carries, in tokens.
+    ctx = ctxgate.estimate_tokens(item["prompt"])
+    # Waiting for the first admission is waiting for a slot, like --concurrency's, so the
+    # item's clock starts after it. Later pauses are part of its time; the row records them.
+    await slot.acquire(ctx)
+    admitted_wait = slot.wait_s
     row, t0 = ep.timed_row(item)
     messages = [{"role": "user", "content": item["prompt"]}]
     usages = []  # one per request of this conversation, in order
@@ -164,6 +178,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             # call had no retry at all, so one HTTP 503 from a hosted gateway discarded
             # an item that had already spent twenty minutes in its tool loop; a single
             # three-minute 503 window cost 24 items at once.
+            await slot.acquire(ctx)
             resp = None
             for i_try in range(ep.DEFAULT_ATTEMPTS):
                 try:
@@ -185,6 +200,14 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             msg = resp.choices[0].message
             finish = getattr(resp.choices[0], "finish_reason", None)
             messages.append(_assistant_msg(msg))
+            # The next prompt is this one plus the turn just generated, less its reasoning
+            # (_assistant_msg drops it). Counting the reasoning anyway leaves room for what
+            # the next request will generate.
+            u = usages[-1] or {}
+            if u.get("prompt_tokens") is not None:
+                ctx = u["prompt_tokens"] + (u.get("completion_tokens") or 0)
+            else:
+                ctx += ctxgate.estimate_tokens(json.dumps(messages[-1]))
             if not msg.tool_calls:
                 final = msg.content or ""
                 break
@@ -202,18 +225,21 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             for tc in skip:
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                                  "content": "Not executed." + _budget_note(ncalls, max_tool_calls)})
+            ctx += sum(ctxgate.estimate_tokens(m["content"]) for m in messages[-len(msg.tool_calls):])
             if max_tool_calls and ncalls >= max_tool_calls:
                 budget_hit = True
                 break
         if not final:
             final, usage, same = await _force_final(client, item, trace, messages, ctx_full,
-                                                    max_tokens)
+                                                    max_tokens, slot, ctx)
             forced = True
             if same:
                 usages.append(usage)
                 spent += (usage or {}).get("completion_tokens") or 0
     except Exception as e:  # noqa: BLE001 - recorded on the row so resume retries it
         err = f"{type(e).__name__}: {e}"
+    finally:
+        slot.release()
     # The final context is the last request of the item's own conversation: its prompt
     # holds the question, every assistant turn and every tool result, so final - prompt
     # is the context the item grew. (Reasoning is dropped between turns, see
@@ -221,12 +247,13 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     prompt_tokens, final_ctx, interaction = context_lengths(usages)
     # finish_reason is the loop's last request's, so an empty answer after a request that
     # ran into max_tokens is marked as an output-limit runaway.
+    gated = {"ctx_pause_s": round(slot.wait_s - admitted_wait, 2)} if ctx_gate else {}
     return ep.finish_row(row, t0, response=final, completion_tokens=spent, rounds=rounds,
                          finish_reason=finish, max_tokens=max_tokens or None,
                          tool_calls=ncalls, tool_trace=trace, forced_final=forced,
                          tool_budget_hit=budget_hit, context_full=ctx_full, prompt_tokens=prompt_tokens,
                          final_context_tokens=final_ctx, interaction_tokens=interaction,
-                         error=err)
+                         error=err, **gated)
 
 
 async def run_no_tools(client, item, max_tokens=DEFAULT_MAX_TOKENS, attempts=3):

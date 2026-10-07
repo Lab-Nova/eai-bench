@@ -27,6 +27,21 @@ python3 hle/src/main.py run --endpoint ... --model ... --limit 5     # smoke tes
 is local tool execution rather than endpoint time, so in-flight requests stay well under
 that. The Python worker pool (16 workers) is the real ceiling on tool throughput; raise
 it with `HLE_PY_WORKERS` if tool calls queue.
+
+`--max-conc-context N` (tools mode, off by default) caps the summed context of the
+running items at N tokens. Concurrency counts items, but a long tool loop grows to
+hundreds of thousands of tokens, and once the conversations in flight outgrow the
+server's KV pool the prefix cache thrashes: every round re-prefills its whole
+conversation and every item slows at once. Under the gate each item holds its current
+context size and applies again before every request; one that no longer fits pauses
+until running items finish or pause in turn. The oldest item goes first, so as contexts
+build up the youngest items pause and the effective concurrency falls, rising again as
+the long items finish. An item that alone exceeds N runs by itself. The hold is the
+context an item brings to a request, not what the request generates, so set N below the
+KV pool with headroom for output. Rows record `ctx_pause_s`, the time an item spent
+paused after it started, and a `[ctx gate]` line reports the gate at most once a minute
+while items wait.
+
 Then grade with the **judge-hle** skill, which ends by
 running `collect`. `audit --results-dir DIR` reports integrity (nothing marked correct
 with an empty response, ids match the subset) and scans the stored tool traces for hits
@@ -100,5 +115,6 @@ numbers generally include search, a caveat when comparing against them.
 ## Files
 
 `main.py` CLI · `dataset.py` subset selection and prompts · `runner.py` the two
-generation modes · `tools.py` the python sandbox · `endpoint.py` async client
+generation modes · `ctxgate.py` the context budget over running items · `tools.py`
+the python sandbox · `endpoint.py` async client
 (vendored) · `resultdir.py` results-directory contract (vendored).

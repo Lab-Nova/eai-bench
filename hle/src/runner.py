@@ -43,13 +43,24 @@ def _is_context_overflow(e):
     return bool(_CTX_PAT.search(str(e)))
 
 
+# Fields an OpenAI-compatible server may return a turn's reasoning in.
+REASONING_FIELDS = ("reasoning_content", "reasoning")
+
+
 def _assistant_msg(msg):
     """Rebuild the assistant turn for the next request.
 
-    reasoning_content is deliberately dropped: it is not part of the OpenAI message
-    schema and the model re-derives its own reasoning each turn.
+    The turn goes back as the server returned it, reasoning included, in whichever
+    field the server used. OpenAI (reasoning items) and Anthropic (thinking blocks) both
+    have a client pass a tool loop's reasoning back unchanged and leave it to the server
+    what the model sees of it. Until October 2026 it was dropped here, which showed the
+    model a history in which it had never reasoned.
     """
     m = {"role": "assistant", "content": msg.content or ""}
+    for key in REASONING_FIELDS:
+        value = getattr(msg, key, None)
+        if value:
+            m[key] = value
     if msg.tool_calls:
         m["tool_calls"] = [
             {"id": tc.id, "type": "function",
@@ -200,9 +211,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             msg = resp.choices[0].message
             finish = getattr(resp.choices[0], "finish_reason", None)
             messages.append(_assistant_msg(msg))
-            # The next prompt is this one plus the turn just generated, less its reasoning
-            # (_assistant_msg drops it). Counting the reasoning anyway leaves room for what
-            # the next request will generate.
+            # The next prompt is this one plus the turn just generated, reasoning included.
             u = usages[-1] or {}
             if u.get("prompt_tokens") is not None:
                 ctx = u["prompt_tokens"] + (u.get("completion_tokens") or 0)
@@ -242,8 +251,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
         slot.release()
     # The final context is the last request of the item's own conversation: its prompt
     # holds the question, every assistant turn and every tool result, so final - prompt
-    # is the context the item grew. (Reasoning is dropped between turns, see
-    # _assistant_msg, so only the last turn's reasoning is in it.)
+    # is the context the item grew, every turn's reasoning included (see _assistant_msg).
     prompt_tokens, final_ctx, interaction = context_lengths(usages)
     # finish_reason is the loop's last request's, so an empty answer after a request that
     # ran into max_tokens is marked as an output-limit runaway.

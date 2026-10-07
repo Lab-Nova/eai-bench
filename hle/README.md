@@ -94,6 +94,16 @@ context is the last request of the item's own conversation (a rebuilt forced-fin
 conversation does not count), so interaction is every assistant turn and tool result the
 item added. `score.json` reports its median, p90 and max.
 
+Every assistant turn goes back into the conversation as the server returned it,
+reasoning included, in whichever field the server used (`reasoning_content` or
+`reasoning`). That is how the OpenAI and Anthropic APIs have a client treat a tool
+loop's reasoning (reasoning items, thinking blocks): pass it back unchanged and let the
+server decide what the model sees. Until October 2026 the reasoning was dropped, so the
+model saw a history in which it had never reasoned, and wherever the chat template
+renders it, the server's prefix cache stopped at each assistant turn instead of reusing
+the tokens it had just generated. Runs from before then are not comparable on this, and
+resuming one with the current client would mix the two.
+
 ## The python tool
 
 Model-written code runs unsupervised in a throwaway directory with a hard **8 GB address

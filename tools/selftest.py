@@ -370,6 +370,31 @@ def test_interaction(tmp):
     check("hle: max_tool_calls=0 leaves the loop uncapped",
           row.get("tool_budget_hit") is False and row.get("response") == "42", f"got {row}")
 
+    class Thinker:
+        """Round 1 reasons and calls a tool, round 2 answers; returns reasoning in `field`."""
+        def __init__(self, field):
+            self.field, self.convos = field, []
+
+        async def create(self, messages, **kw):
+            self.convos.append([dict(m) for m in messages])
+            n = len(self.convos)
+            usage = NS(completion_tokens=5, model_dump=lambda: {"prompt_tokens": 10 * n,
+                                                               "completion_tokens": 5})
+            calls = [NS(id="t1", function=NS(name="nope", arguments="{}"))] if n == 1 else None
+            msg = NS(content=None if n == 1 else "42", tool_calls=calls, **{self.field: f"plan {n}"})
+            return NS(choices=[NS(message=msg)], usage=usage)
+
+    def sent_back(field, **kw):
+        thinker = Thinker(field)
+        asyncio.run(runner.run_with_tools(thinker, {"id": "w", "prompt": "q"}, **kw))
+        return next(m for m in thinker.convos[-1] if m["role"] == "assistant")
+
+    check("hle: an assistant turn goes back with its reasoning_content",
+          sent_back("reasoning_content").get("reasoning_content") == "plan 1")
+    check("hle: reasoning goes back under the field the server returned it in",
+          sent_back("reasoning").get("reasoning") == "plan 1"
+          and "reasoning_content" not in sent_back("reasoning"))
+
     sys.path.insert(0, os.path.join(REPO, "bfcl", "src"))
     try:
         from importlib.util import module_from_spec, spec_from_file_location

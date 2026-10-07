@@ -167,6 +167,8 @@ counted as a spurious incorrect had it not been spotted by hand.
 
 ## Reference numbers
 
+### GLM-5.3
+
 GLM-5.3 BF16 weights with a BF16 KV cache, under sglang on 4 GB300 trays (16 GPUs, TP16),
 October 2026, at the 131,072-token cap. HLE, AA-LCR, Counting-Stars and qa3 sample at
 temperature 0.6 / top_p 0.95 (run of 2026-10-05). BFCL samples at bfcl-eval's own 0.001 and
@@ -192,6 +194,39 @@ output-limit column counts the runaways they leave out (see above).
 
 At temperature 1.0 the same AA-LCR server ran past the cap on 1 of 100 questions; at 0.6
 the rate is 8.8%.
+
+### Kimi-K3
+
+Kimi-K3 as released (MXFP4 routed experts, BF16 elsewhere) with a BF16 KV cache, under
+sglang v0.5.21 on 2 GB300 trays (8 GPUs, TP8 + DCP8, DSPARK speculative decoding, the
+SGLang cookbook recipe; KV pool 995,840 tokens). The runs date from October 2026, at the
+131,072-token cap and the sampling above. BFCL, AA-LCR and the probes ran at 79a5713.
+HLE ran at 78b7895: python only, with each turn's reasoning sent back. The interaction
+columns are recomputed with the current code. glm-5.3 gave no verdict on 3 HLE items, so
+Sonnet graded those (1 correct).
+
+| Component | Accuracy | Interaction median | Interaction mean | Output limit |
+|---|---|---|---|---|
+| BFCL-500 | 384/500 = 76.80 ± 1.89% | 272 ± 11 | 1,424 | n/a |
+| · single-turn (412) | | 230 ± 10 | 386 | |
+| · multi-turn (88) | | 4,046 ± 282 | 6,285 | |
+| HLE-250 with tools | 135/250 = 54.00 ± 3.15% | 14,743 ± 1,565 | 29,562 | 0/250 |
+| AA-LCR-100 (v1.1), avg@5 | 433/500 = 86.60 ± 3.11% | 626 ± 20 | 1,165 | 0/500 |
+| **Composite** | **72.47** | | | |
+| Counting-Stars (probe), avg@10 | 89.31 ± 2.64% | 3,141 ± 126 | 6,912 | 12/300 = 4.0%, + 5 below |
+| BABILong qa3 (probe) | 250/400 = 62.50 ± 2.42% | 4,270 ± 820 | 10,157 | 56/400 = 14.0% |
+| · 0k | 100/100 | 1,236 ± 121 | 1,396 | 0/100 |
+| · 128k | 82/100 | 7,370 ± 1,608 | 8,285 | 6/100 |
+| · 256k | 40/100 | 13,814 ± 2,060 | 18,084 | 19/100 |
+| · 384k | 28/100 | 12,112 ± 2,954 | 16,098 | 31/100 |
+
+Counting-Stars scores EN 0.820 and ZH 0.967. Its lengths are counted in GLM-5.3 tokens. In
+K3 tokens the EN-960k prompt is 962,719, so the `max_tokens` the client derives from the
+GLM-5.3 count overran the window and the server returned HTTP 400. Those 10 samples were
+resumed with `--max-tokens context` (85,838). With that prompt, though, the KV pool has
+room for only about 32k output tokens. 5 of the 10 stopped at 32,255 when sglang reported
+the pool full. They have no answer and score 0 (`no_answer` records them as `empty`). The
+cause is the serving setup, not the model, and it costs at most 1.7 points.
 
 `tools/import_legacy.py` converts the original `eai-v1.0` run into four dated result
 directories, which is also the regression test for this repo: the imported scores must

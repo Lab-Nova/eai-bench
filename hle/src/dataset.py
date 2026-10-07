@@ -19,7 +19,7 @@ Explanation: {your explanation for your answer choice}
 Answer: {your chosen answer}
 Confidence: {your confidence score between 0% and 100% for your answer}"""
 
-TOOL_PREAMBLE = """You have two tools available: `python` (run Python 3 code, returns stdout/stderr) and `web_search` (search the web). Use them whenever calculation or a factual lookup would make your answer more reliable. When you are done using tools, give your final answer in the required format."""
+TOOL_PREAMBLE = """You have one tool available: `python` (run Python 3 code, returns stdout/stderr). Use it whenever calculation would make your answer more reliable. When you are done using it, give your final answer in the required format."""
 
 GATED_HELP = """\
 `cais/hle` is a gated dataset. Either:

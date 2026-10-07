@@ -1,7 +1,7 @@
 """Driving one HLE item to a final answer, in either mode.
 
 no-tools: one streamed completion, capped at max_tokens.
-tools:    an agentic loop -- the model calls `python` and `web_search` until it stops,
+tools:    an agentic loop -- the model calls `python` until it stops,
           or until it has used its tool-call budget (DEFAULT_MAX_TOOL_CALLS). Every tool
           result tells the model how much of that budget is left. Each request is also
           capped at max_tokens, and the server's context window bounds the conversation.
@@ -24,11 +24,12 @@ from resultdir import context_lengths
 # component instead.
 DEFAULT_MAX_TOKENS = ep.DEFAULT_MAX_TOKENS
 
-# Tool calls an item may execute. The BF16 reference run's most tool-hungry correct item
-# used 437 and its deepest 867; an fp4 run's runaway loop went to ~9,000 rounds before it
-# was stopped by hand. Calls past the budget are answered "not executed" and the item
-# goes to the forced final.
-DEFAULT_MAX_TOOL_CALLS = 1024
+# Tool calls an item may execute. Calls past the budget are answered "not executed" and
+# the item goes to the forced final. It was 1024 until October 2026, when Kimi-K3 loops
+# repeated one identical call hundreds of times (828 runs of the same python code; one
+# search query 972 times) and grew 450k-920k-token contexts that starved every other item
+# of KV cache.
+DEFAULT_MAX_TOOL_CALLS = 512
 
 _CTX_PAT = re.compile(
     r"context length|context window|longer than|maximum context|too long|"

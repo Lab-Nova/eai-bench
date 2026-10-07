@@ -184,9 +184,10 @@ def cmd_audit(a):
           f"context_full: {sum(1 for r in rows if r.get('context_full'))}  "
           f"tool_budget_hit: {sum(1 for r in rows if r.get('tool_budget_hit'))}")
 
-    # With web search enabled the model can in principle retrieve the question set
-    # itself. Official "HLE w/ tools" numbers carry the same exposure, but it should be
-    # quantified before publishing rather than assumed absent.
+    # The python tool has internet access, so the model can in principle retrieve the
+    # question set itself (runs before October 2026 also had web_search). Official "HLE
+    # w/ tools" numbers carry the same exposure, but it should be quantified before
+    # publishing rather than assumed absent.
     print("\n=== contamination ===")
     dom_hits, hle_hits, searched = {}, [], 0
     for r in rows:
@@ -226,7 +227,7 @@ def main():
     r.add_argument("--results-dir", help="resume into this directory instead of creating one")
     mode = r.add_mutually_exclusive_group()
     mode.add_argument("--tools", dest="tools", action="store_true", default=True,
-                      help="agentic mode with python + web_search (default)")
+                      help="agentic mode with the python tool (default)")
     mode.add_argument("--no-tools", dest="tools", action="store_false",
                       help="single-turn, no tools")
     r.add_argument("--n-subset", type=int, default=dataset.N_SUBSET)

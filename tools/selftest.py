@@ -353,7 +353,7 @@ def test_interaction(tmp):
     greedy = Greedy()
     row = asyncio.run(runner.run_with_tools(greedy, {"id": "y", "prompt": "q"}, max_tool_calls=3))
     tool_msgs = [m for m in greedy.convos[-1] if m["role"] == "tool"]
-    check("hle: the default tool-call budget is 1024", runner.DEFAULT_MAX_TOOL_CALLS == 1024)
+    check("hle: the default tool-call budget is 512", runner.DEFAULT_MAX_TOOL_CALLS == 512)
     check("hle: only the budgeted tool calls execute",
           row.get("tool_calls") == 3 and len(row.get("tool_trace") or []) == 3, f"got {row}")
     check("hle: every tool result reports the budget left",

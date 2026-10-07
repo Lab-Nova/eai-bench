@@ -4,7 +4,7 @@
 
 | Mode | Flag | Generation cap | Tools |
 |---|---|---|---|
-| with tools (default) | `--tools` | 131,072 per request | `python`, `web_search` |
+| with tools (default) | `--tools` | 131,072 per request | `python` |
 | no tools | `--no-tools` | 131,072 | none |
 
 **Both modes select the identical 250 ids**, so they are directly comparable;
@@ -25,13 +25,14 @@ python3 hle/src/main.py run --endpoint ... --model ... --limit 5     # smoke tes
 
 `--concurrency` defaults to 256 — high on purpose, because most of an item's wall-clock
 is local tool execution rather than endpoint time, so in-flight requests stay well under
-that. The tool pools (16 Python workers, 8 search) are the real ceiling on tool
-throughput; raise them with `HLE_PY_WORKERS` / `HLE_SEARCH_WORKERS` if tool calls queue.
+that. The Python worker pool (16 workers) is the real ceiling on tool throughput; raise
+it with `HLE_PY_WORKERS` if tool calls queue.
 Then grade with the **judge-hle** skill, which ends by
 running `collect`. `audit --results-dir DIR` reports integrity (nothing marked correct
 with an empty response, ids match the subset) and scans the stored tool traces for hits
-on dataset-hosting domains — with web search enabled the model can in principle retrieve
-the question set, and that exposure is worth quantifying rather than assuming absent.
+on dataset-hosting domains — the python tool has internet access, so the model can in
+principle retrieve the question set, and that exposure is worth quantifying rather than
+assuming absent.
 
 ## Dataset access
 
@@ -43,21 +44,23 @@ a 401 several minutes into a run.
 ## The agentic loop
 
 With tools, the model is driven until it stops calling them or has used its **tool-call
-budget of 1024 calls** (`--max-tool-calls N`; 0 = uncapped). Every tool result ends with
-the budget line — `[tool budget: 37 of 1024 tool calls used, 987 remaining]` — so the
+budget of 512 calls** (`--max-tool-calls N`; 0 = uncapped). Every tool result ends with
+the budget line — `[tool budget: 37 of 512 tool calls used, 475 remaining]` — so the
 model always knows what it has left. Calls past the budget are answered "Not executed"
 instead of running, and the item goes to the forced final below; `tool_budget_hit` is
 recorded on the row. There is no round cap and no total generation budget — each request
 carries the suite-wide `max_tokens` of 131,072, and beyond that the ceilings are the tool
-budget, the server's context window and the model deciding it is done. Items legitimately
-run past 100 rounds; the deepest observed in the reference run was 491 rounds.
+budget, the server's context window and the model deciding it is done. Every tool round
+executes at least one call, so the budget also bounds an item to 512 tool rounds.
 
-The tool budget exists because the uncapped loop has no other end. In the October 2026
-GLM-5.3 runs the most tool-hungry correct item used 485 calls, while one fp4 item looped
-for about 9,000 rounds until it was stopped by hand. 1024 leaves twice the largest
-correct item's room. (The reference run sent no `max_tokens` at all. A server
-that refuses prompt + `max_tokens` over the window now reports the context full about
-131k tokens earlier, which goes to the forced final below.) `--gen-budget N` caps the
+The tool budget exists because the uncapped loop has no other end: one fp4 GLM-5.3 item
+looped for about 9,000 rounds until it was stopped by hand. It was 1024 until October
+2026, when Kimi-K3 runs repeated one identical call hundreds of times (828 runs of the
+same python code, one search query 972 times) and grew 450k–920k-token contexts that
+starved every other in-flight item of KV cache. (The reference run sent no `max_tokens`
+at all. A server that refuses prompt + `max_tokens` over the window now reports the
+context full about 131k tokens earlier, which goes to the forced final below.)
+`--gen-budget N` caps the
 completion tokens summed over the loop; `--max-tokens 0` drops the per-request cap.
 
 The round cap and generation budget are off by default because they silently produced empty
@@ -88,12 +91,14 @@ memory, and OpenBLAS reserves a stack per thread — across 64 threads that over
 sane ceiling before a single array is allocated, which is why a first attempt at a 4 GB
 limit broke numpy outright.
 
-`web_search` uses DuckDuckGo via `ddgs` with a Wikipedia API fallback. It is keyless, so
-results are weaker than a production search backend — a real caveat when comparing
-against published with-tools numbers.
+There is no search tool. Runs before October 2026 also offered `web_search`
+(DuckDuckGo via `ddgs`, Wikipedia API fallback); it was removed because from the cluster
+a third to a half of its calls failed outright, many of the rest returned unrelated pages,
+and models retried the same query hundreds of times against it. Published with-tools
+numbers generally include search, a caveat when comparing against them.
 
 ## Files
 
 `main.py` CLI · `dataset.py` subset selection and prompts · `runner.py` the two
-generation modes · `tools.py` the python sandbox and search · `endpoint.py` async client
+generation modes · `tools.py` the python sandbox · `endpoint.py` async client
 (vendored) · `resultdir.py` results-directory contract (vendored).

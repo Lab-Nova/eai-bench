@@ -143,7 +143,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     messages = [{"role": "user", "content": item["prompt"]}]
     usages = []  # one per request of this conversation, in order
     spent = rounds = ncalls = 0
-    final, trace, err = "", [], None
+    final, trace, err, finish = "", [], None, None
     forced = ctx_full = budget_hit = False
     try:
         while True:
@@ -182,6 +182,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             if resp.usage:
                 spent += resp.usage.completion_tokens or 0
             msg = resp.choices[0].message
+            finish = getattr(resp.choices[0], "finish_reason", None)
             messages.append(_assistant_msg(msg))
             if not msg.tool_calls:
                 final = msg.content or ""
@@ -217,7 +218,10 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     # is the context the item grew. (Reasoning is dropped between turns, see
     # _assistant_msg, so only the last turn's reasoning is in it.)
     prompt_tokens, final_ctx, interaction = context_lengths(usages)
+    # finish_reason is the loop's last request's, so an empty answer after a request that
+    # ran into max_tokens is marked as an output-limit runaway.
     return ep.finish_row(row, t0, response=final, completion_tokens=spent, rounds=rounds,
+                         finish_reason=finish, max_tokens=max_tokens or None,
                          tool_calls=ncalls, tool_trace=trace, forced_final=forced,
                          tool_budget_hit=budget_hit, context_full=ctx_full, prompt_tokens=prompt_tokens,
                          final_context_tokens=final_ctx, interaction_tokens=interaction,

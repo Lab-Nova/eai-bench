@@ -28,9 +28,11 @@ interpreter automatically. Re-running `run` against an existing `--results-dir` 
 Every request carries `max_tokens` 131,072 (`--max-tokens`, the suite-wide budget; 0
 sends none, as upstream does). bfcl-eval has no setting for it, so the shim registers a
 subclass of `OpenAICompletionsHandler` that adds it in `generate_with_backoff`. `collect`
-reports `interaction_tokens_median` (with p90 and max): per task, the last request's
-input + output tokens minus the first request's input, from the token counts bfcl-eval
-records per step.
+reports `interaction_tokens_median` (with bootstrap SE, mean, p90 and max): per task, the
+last request's input + output tokens minus the first request's input, from the token
+counts bfcl-eval records per step. Single-turn and multi-turn tasks differ about 25x and
+82% are single-turn, so the pooled median only describes single-turn; `interaction_by`
+repeats the numbers for `single_turn` and `multi_turn`.
 
 `setup` installs `soundfile` alongside the pin. `bfcl-eval` 2026.3.23 does not declare it,
 but touching `bfcl_eval.constants.model_config` imports the entire handler registry, and

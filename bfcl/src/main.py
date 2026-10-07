@@ -532,9 +532,14 @@ def cmd_collect(a):
                    for cat, entries in rows.items()
                    if any(r.get("status") == "timeout" for r in entries)}
     n_timeout = sum(map(len, timeout_ids.values()))
-    interaction = sorted(t for t in (row_interaction_tokens(r)
-                                     for entries in rows.values() for r in entries
-                                     if not is_failed(r)) if t is not None)
+    # Single-turn and multi-turn differ ~25x in interaction and multi-turn is under a
+    # fifth of the tasks, so a pooled median only describes single-turn: report both.
+    by_turn = {"single_turn": [], "multi_turn": []}
+    for cat, entries in rows.items():
+        key = "multi_turn" if cat.startswith("multi_turn") else "single_turn"
+        by_turn[key] += [t for t in (row_interaction_tokens(r) for r in entries
+                                     if not is_failed(r)) if t is not None]
+    interaction = sorted(by_turn["single_turn"] + by_turn["multi_turn"])
 
     score = {
         "component": COMPONENT,
@@ -556,12 +561,18 @@ def cmd_collect(a):
         "scored_at": resultdir.now_stamp(),
     }
     if interaction:
-        n = len(interaction)
-        # Flat, like resultdir.runtime_stats in the other components.
+        # Flat, like resultdir.runtime_stats in the other components, plus the split.
+        st = resultdir.token_stats(interaction)
         score.update({
-            "interaction_tokens_median": statistics.median(interaction),
-            "interaction_tokens_p90": interaction[min(n - 1, int(0.9 * n))],
-            "interaction_tokens_max": interaction[-1],
+            "interaction_tokens_median": st["median"],
+            "interaction_tokens_median_se": st["median_se"],
+            "interaction_tokens_mean": st["mean"],
+            "interaction_tokens_p90": st["p90"],
+            "interaction_tokens_max": st["max"],
+            "interaction_tokens_n": st["n"],
+            "interaction_by": {k: {"interaction_tokens_" + f: v
+                                   for f, v in resultdir.token_stats(vals).items()}
+                               for k, vals in by_turn.items() if vals},
         })
     # Deadline-limited benchmark scores remain separate from uncapped accuracy.
     for k in ("endpoint", "model", "registry_name", "temperature", "imported",
@@ -588,10 +599,12 @@ def cmd_collect(a):
     rd._write_json(rd.score_path, score)
     print(json.dumps({k: v for k, v in score.items() if k != "by_category"}, indent=2))
     if interaction:
-        rs = score
-        print(f"\ninteraction tokens (final context - prompt): median "
-              f"{rs['interaction_tokens_median']:.0f}  p90 {rs['interaction_tokens_p90']}  "
-              f"max {rs['interaction_tokens_max']}")
+        print("\ninteraction tokens (final context - prompt):")
+        for k, b in list(score["interaction_by"].items()) + [("all", score)]:
+            print(f"  {k:12s} n {b['interaction_tokens_n']:4d}  median "
+                  f"{b['interaction_tokens_median']:,.0f} ± {b['interaction_tokens_median_se']:,.0f}  "
+                  f"mean {b['interaction_tokens_mean']:,.0f}  p90 {b['interaction_tokens_p90']:,}  "
+                  f"max {b['interaction_tokens_max']:,}")
     if cfg.get("benchmark"):
         print(f"\nbenchmark run: {n_subset} tasks, {n_timeout} timeouts; "
               "timeouts count as incorrect. synthesis.py skips benchmark scores.")

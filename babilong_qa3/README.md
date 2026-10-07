@@ -31,8 +31,10 @@ Settings:
   the cap the reference numbers below were measured under. qa3 at 256k is reasoned over
   for about 40k tokens on average, but the tail runs past 131k: 3 to 8 of 100 answers per
   endpoint were truncated to nothing. `score.json` records `truncated`, the number of
-  answers that hit `max_tokens`, and the median `interaction_tokens` (final context −
-  prompt). `--max-tokens context` asks for the whole window minus the prompt instead.
+  answers that hit `max_tokens`, and the interaction (final context − prompt) of the
+  answered items, pooled and per length under `interaction_by`; 0k answers take a few
+  hundred tokens and the long lengths tens of thousands, so the pooled median mostly
+  says how many items are long. `collect` prints the per-length table. `--max-tokens context` asks for the whole window minus the prompt instead.
 - Install `datasets`, `tokenizers`, `nltk`, `pandas`, `numpy` and `openai`. The last
   four are only needed for generation.
 
@@ -81,7 +83,18 @@ after dropping rooms the question itself names. Naming two rooms is wrong.
 ## Reference numbers
 
 GLM-5.3 BF16 weights / BF16 KV cache, all 400 samples, clarified question, temperature 0.6 /
-top_p 0.95, `max_tokens` 131072, October 2026: pending.
+top_p 0.95, `max_tokens` 131072, October 2026:
+
+| Length | Correct | Median interaction | Mean interaction | Output limit |
+|---|---|---|---|---|
+| 0k | 100/100 | 634 ± 60 | 890 | 0/100 |
+| 128k | 50/100 | 23,284 ± 5,789 | 28,110 | 15/100 |
+| 256k | 30/100 | 26,689 ± 5,859 | 33,853 | 19/100 |
+| 384k | 21/100 | 25,194 ± 4,543 | 27,877 | 28/100 |
+| All 400 | 50.25 ± 2.50% | 9,884 ± 2,073 | 21,383 | 62/400 = 15.5% |
+
+Interaction is over answered samples only (median ± bootstrap SE). The 62 runaways score
+wrong and are left out of it.
 
 ## Files
 

@@ -96,12 +96,27 @@ Timestamps are UTC and filesystem-safe, so they sort lexically and "latest" is j
 `score.json` is the only contract between a client and `synthesis.py` — `component`,
 `correct`, `total`, `accuracy`, `complete`, plus runtime statistics.
 
-Every component asks for at most **131,072 tokens per request** (`--max-tokens`), and
-every `score.json` reports `interaction_tokens_median` (with p90 and max): final context
-length − prompt length per item. For a single-turn item that is its completion; for a
-BFCL multi-turn task or an HLE tool loop it is everything the conversation added between
-the first prompt and the end of the last response. `synthesis.py` prints the median on
-each component's runtime line. The denominator is
+Every component asks for at most **131,072 tokens per request** (`--max-tokens`).
+*Interaction* is final context length − prompt length per item. For a single-turn item
+that is its completion; for a BFCL multi-turn task or an HLE tool loop it is everything
+the conversation added between the first prompt and the end of the last response.
+Every `score.json` reports:
+
+- `interaction_tokens_median` with a 2000-resample bootstrap `_median_se`, plus `_mean`,
+  `_p90`, `_max` and `_n`, over the items that **produced an answer**. Runaways (below)
+  sit at the cap and would swamp the mean, so they are left out of all of these.
+- `no_answer` (`output_limit` / `empty` counts) and `output_limit_rate`: the share of
+  error-free items that reasoned into the token cap or the context window without a final
+  answer. These are the runaways. They score wrong, and their rate is reported on its own.
+  Runs written before the NO ANSWER marker are read the same way. bfcl-eval's rows do not
+  record a cap hit, so BFCL has no `no_answer`.
+- `interaction_by`, the same numbers per stratum, where one pooled median would describe
+  only the majority: BFCL `single_turn` / `multi_turn` (82% of the tasks are single-turn,
+  at about 1/25 the interaction) and qa3 per haystack length.
+- HLE also reports tool `rounds_median`, `_mean`, `_p90` and `_max` over answered items.
+
+`synthesis.py` prints the median, the strata and the output-limit rate on each
+component's runtime line. The accuracy denominator is
 always the **subset**, never the number of items that happened to answer or get graded:
 an item that errored or was never judged is not excused from the denominator, it is
 simply not correct.
@@ -157,21 +172,26 @@ October 2026, at the 131,072-token cap. HLE, AA-LCR, Counting-Stars and qa3 samp
 temperature 0.6 / top_p 0.95 (run of 2026-10-05). BFCL samples at bfcl-eval's own 0.001 and
 is the run of 2026-10-01. Accuracy SE is binomial over the subset, except AA-LCR (over the
 100 per-question means of avg@5) and Counting-Stars (over its 30 language x length cells).
-Median-interaction SE is a 2000-resample bootstrap over the items that produced an answer
-(`compare/eai_stats.py` in workspace-needle).
+Interaction columns are over answered items only (median ± bootstrap SE, and mean); the
+output-limit column counts the runaways they leave out (see above).
 
-| Component | Accuracy | Median interaction (tokens) |
-|---|---|---|
-| BFCL-500 | 374/500 = 74.80 ± 1.94% | 195 ± 7 |
-| HLE-250 with tools | pending | |
-| AA-LCR-100 (v1.1), avg@5 | 365/500 = 73.00 ± 3.67% | 1,727 ± 132 (n=456) |
-| **Composite** | pending (needs HLE) | |
-| Counting-Stars (probe), avg@10 | pending | |
-| BABILong qa3 (probe) | pending | |
+| Component | Accuracy | Interaction median | Interaction mean | Output limit |
+|---|---|---|---|---|
+| BFCL-500 | 374/500 = 74.80 ± 1.94% | 195 ± 7 | 1,631 | n/a |
+| · single-turn (412) | | 160 ± 10 | 260 | |
+| · multi-turn (88) | | 3,864 ± 412 | 8,052 | |
+| HLE-250 with tools | pending | | | |
+| AA-LCR-100 (v1.1), avg@5 | 365/500 = 73.00 ± 3.67% | 1,727 ± 135 | 3,595 | 44/500 = 8.8% |
+| **Composite** | pending (needs HLE) | | | |
+| Counting-Stars (probe), avg@10 | 88.74 ± 1.93% | 1,719 ± 60 | 2,273 | 7/300 = 2.3% |
+| BABILong qa3 (probe) | 201/400 = 50.25 ± 2.50% | 9,884 ± 2,073 | 21,383 | 62/400 = 15.5% |
+| · 0k | 100/100 | 634 ± 60 | 890 | 0/100 |
+| · 128k | 50/100 | 23,284 ± 5,789 | 28,110 | 15/100 |
+| · 256k | 30/100 | 26,689 ± 5,859 | 33,853 | 19/100 |
+| · 384k | 21/100 | 25,194 ± 4,543 | 27,877 | 28/100 |
 
-On AA-LCR, 44 of the 500 samples (8.8%) reasoned until the cap without a final answer.
-They are written as `NO ANSWER: output limit exceeded ...` (see Resuming) and count as
-wrong. At temperature 1.0 the same server ran past the cap on 1 of 100 questions.
+At temperature 1.0 the same AA-LCR server ran past the cap on 1 of 100 questions; at 0.6
+the rate is 8.8%.
 
 `tools/import_legacy.py` converts the original `eai-v1.0` run into four dated result
 directories, which is also the regression test for this repo: the imported scores must

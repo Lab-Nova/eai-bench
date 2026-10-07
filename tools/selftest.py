@@ -415,6 +415,47 @@ def test_interaction(tmp):
           st.get("interaction_tokens_median") == 20 and st.get("interaction_tokens_max") == 30,
           f"got {st}")
 
+    import endpoint as ep
+    from resultdir import no_answer_kind
+    t0 = 0
+    run = ep.finish_row({"id": "r"}, t0, response="", interaction_tokens=131072, max_tokens=131072)
+    check("finish_row marks a cap-hit empty answer", run.get("no_answer") == "output_limit"
+          and run["response"] == ep.NO_ANSWER_LIMIT and is_done(run), f"got {run}")
+    run = ep.finish_row({"id": "r"}, t0, response="", interaction_tokens=130768, rounds=1)
+    check("finish_row: an HLE loop near the cap without max_tokens is output_limit",
+          run.get("no_answer") == "output_limit", f"got {run.get('no_answer')}")
+    run = ep.finish_row({"id": "r"}, t0, response="", interaction_tokens=40)
+    check("finish_row marks a short empty answer as empty", run.get("no_answer") == "empty")
+    run = ep.finish_row({"id": "r"}, t0, response="", error="Timeout")
+    check("finish_row leaves an error row unmarked",
+          "no_answer" not in run and run["response"] == "" and not is_done(run))
+    check("no_answer_kind reads an unmarked legacy runaway",
+          no_answer_kind({"error": None, "response": "", "finish_reason": "length"}) == "output_limit")
+
+    rd = ResultDir.start(tmp, suffix="na")
+    write_rows(rd.responses_path, [
+        {"id": "a", "error": None, "response": "x", "interaction_tokens": 100, "length": "0k"},
+        {"id": "b", "error": None, "response": "x", "interaction_tokens": 300, "length": "0k"},
+        {"id": "c", "error": None, "response": "x", "interaction_tokens": 5000, "length": "128k"},
+        {"id": "d", "error": None, "response": ep.NO_ANSWER_LIMIT, "no_answer": "output_limit",
+         "interaction_tokens": 131072, "length": "128k"},
+        {"id": "e", "error": None, "response": "", "finish_reason": "length",
+         "interaction_tokens": 131072, "length": "128k"},
+        {"id": "f", "error": "boom", "response": "", "length": "128k"},
+    ])
+    st = rd.runtime_stats(stratify=lambda r: r.get("length"))
+    check("runaways are left out of the interaction median and mean",
+          st.get("interaction_tokens_n") == 3 and st.get("interaction_tokens_median") == 300
+          and st.get("interaction_tokens_mean") == 1800.0, f"got {st}")
+    check("runaways are counted, marked or not; errors are not",
+          st.get("no_answer") == {"output_limit": 2, "empty": 0}
+          and st.get("output_limit_rate") == 0.4, f"got {st.get('no_answer')} {st.get('output_limit_rate')}")
+    by = st.get("interaction_by") or {}
+    check("stratify reports each stratum separately",
+          by.get("0k", {}).get("interaction_tokens_median") == 200
+          and by.get("128k", {}).get("interaction_tokens_median") == 5000
+          and by.get("128k", {}).get("no_answer", {}).get("output_limit") == 2, f"got {by}")
+
 
 def main():
     tmp = tempfile.mkdtemp(prefix="eai-selftest-")

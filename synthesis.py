@@ -94,9 +94,18 @@ def runtime_line(s):
     if s.get("prompt_tokens_total"):
         bits.append(f"{s['prompt_tokens_total']:,} prompt tokens")
     if s.get("interaction_tokens_median") is not None:
-        bits.append(f"interaction med {s['interaction_tokens_median']:,.0f} tokens")
+        se = s.get("interaction_tokens_median_se")
+        bits.append(f"interaction med {s['interaction_tokens_median']:,.0f}"
+                    + (f" ± {se:,.0f}" if se is not None else "") + " tokens")
+    for k, b in (s.get("interaction_by") or {}).items():
+        if b.get("interaction_tokens_median") is not None:
+            bits.append(f"{k} med {b['interaction_tokens_median']:,.0f}")
+    if s.get("no_answer") is not None:
+        bits.append(f"{s['no_answer'].get('output_limit', 0)} hit the output limit "
+                    f"({100 * s.get('output_limit_rate', 0):.1f}%)")
     if s.get("rounds_median") is not None:
-        bits.append(f"rounds med {s['rounds_median']:g} / max {s['rounds_max']}")
+        p90 = f" / p90 {s['rounds_p90']}" if s.get("rounds_p90") is not None else ""
+        bits.append(f"rounds med {s['rounds_median']:g}{p90} / max {s['rounds_max']}")
     if s.get("tool_calls_total"):
         bits.append(f"{s['tool_calls_total']:,} tool calls")
     return "  " + ", ".join(bits) if bits else ""

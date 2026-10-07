@@ -180,8 +180,10 @@ NO_ANSWER_EMPTY = "NO ANSWER: the model returned an empty response."
 def finish_row(row, t0, **fields):
     row.update(fields)
     if not row.get("error") and not (row.get("response") or "").strip():
-        cap, used = row.get("max_tokens"), row.get("interaction_tokens") or 0
-        hit = row.get("finish_reason") == "length" or bool(cap and used >= cap)
+        # Same rule as resultdir.hit_output_limit: the token cap or the context window.
+        cap, used = row.get("max_tokens") or DEFAULT_MAX_TOKENS, row.get("interaction_tokens") or 0
+        hit = (row.get("finish_reason") == "length" or bool(row.get("context_full"))
+               or used >= 0.99 * cap)
         row["no_answer"] = "output_limit" if hit else "empty"
         row["response"] = NO_ANSWER_LIMIT if hit else NO_ANSWER_EMPTY
     row["latency_s"] = round(time.time() - t0, 2)

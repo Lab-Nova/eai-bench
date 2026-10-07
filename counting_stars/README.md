@@ -85,7 +85,15 @@ which is git-ignored. Built prompts are cached there too, about 60 MB for all 30
 ## Reference numbers
 
 GLM-5.3 BF16 weights / BF16 KV cache, 10 samples per cell (300 requests), temperature 0.6 /
-top_p 0.95, `max_tokens` 131072, October 2026, mean ± SE over the 30 cells: pending.
+top_p 0.95, `max_tokens` 131072, October 2026, mean ± SE over the 30 cells:
+**0.887 ± 0.019** (EN 0.915, ZH 0.860).
+
+| Length | 64k | 128k | 192k | 256k | 320k | 384k | 448k | 512k | 576k | 640k | 704k | 768k | 832k | 896k | 960k |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| EN+ZH | 0.989 | 0.955 | 0.969 | 0.992 | 0.941 | 0.886 | 0.961 | 0.944 | 0.863 | 0.884 | 0.900 | 0.758 | 0.809 | 0.722 | 0.739 |
+
+Interaction tokens over the 293 answered requests: median 1,719 ± 60 (bootstrap SE),
+mean 2,273, p90 3,047. 7 of 300 answers ran past the cap and scored 0.
 
 ## Files
 

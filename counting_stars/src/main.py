@@ -247,9 +247,12 @@ def collect(rd):
     print(f"{'mean':>8s} " + " ".join(f"{by_lang[x]:6.3f}" for x in langs)
           + f"   overall {score['accuracy']:.3f} +- {se:.3f}  ({responded}/{total} answered)")
     if score.get("interaction_tokens_median") is not None:
-        print(f"interaction tokens (final context - prompt): "
-              f"median {score['interaction_tokens_median']:,.0f}  "
+        print(f"interaction tokens (final context - prompt), answered items: "
+              f"median {score['interaction_tokens_median']:,.0f} ± {score['interaction_tokens_median_se']:,.0f}  "
+              f"mean {score['interaction_tokens_mean']:,.0f}  "
               f"p90 {score['interaction_tokens_p90']:,}  max {score['interaction_tokens_max']:,}")
+    print(f"no answer at the output limit: {score['no_answer']['output_limit']} "
+          f"({100 * score['output_limit_rate']:.1f}%)")
     if not score["complete"]:
         print(f"WARNING: {total - responded} item(s) have no answer and score 0; "
               f"resume with run --results-dir {rd.path}", file=sys.stderr)

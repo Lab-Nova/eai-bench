@@ -18,6 +18,7 @@ Vendored byte-identically into `hle/src/` and `aalcr/src/`; see endpoint.py for 
 import datetime
 import json
 import os
+import random
 import statistics
 
 STAMP_FMT = "%Y-%m-%dT%H-%M-%SZ"
@@ -59,6 +60,52 @@ def interaction_tokens(row):
     if "rounds" not in row and isinstance(usage.get("completion_tokens"), int):
         return usage["completion_tokens"]
     return None
+
+
+# The suite-wide per-request cap; a row that does not record its own `max_tokens` is
+# read against this.
+OUTPUT_CAP = 131072
+
+
+def hit_output_limit(row):
+    """Whether a row ran into a length limit: the token cap or the context window."""
+    cap = row.get("max_tokens") or OUTPUT_CAP
+    used = row.get("interaction_tokens") or 0
+    return (row.get("finish_reason") == "length" or bool(row.get("context_full"))
+            or used >= 0.99 * cap)
+
+
+def no_answer_kind(row):
+    """Why an error-free row has no final answer: 'output_limit', 'empty', or None.
+
+    endpoint.finish_row stamps `no_answer` on new rows (and writes a NO ANSWER marker as
+    the response). Rows written before that have an empty response instead and are read
+    the same way here, so old and new runs report runaways alike.
+    """
+    if row.get("error"):
+        return None
+    if row.get("no_answer"):
+        return row["no_answer"]
+    if (row.get("response") or "").strip():
+        return None
+    return "output_limit" if hit_output_limit(row) else "empty"
+
+
+def token_stats(values, n_boot=2000, seed=0):
+    """n, median with a bootstrap SE, mean, p90 and max of token counts; None if empty.
+
+    The SE is the stdev of the median over `n_boot` resamples (seeded, so a re-collect
+    reproduces it).
+    """
+    v = sorted(values)
+    if not v:
+        return None
+    rng = random.Random(seed)
+    meds = [statistics.median(rng.choices(v, k=len(v))) for _ in range(n_boot)]
+    return {"n": len(v), "median": statistics.median(v),
+            "median_se": round(statistics.stdev(meds), 1) if len(v) > 1 else 0.0,
+            "mean": round(statistics.mean(v), 1),
+            "p90": v[min(len(v) - 1, int(0.9 * len(v)))], "max": v[-1]}
 
 
 def context_lengths(usages):
@@ -318,8 +365,11 @@ class ResultDir:
                 out.append(rid)
         return out
 
-    def collect(self, component, extra=None):
-        """Fold grades/ into grades.jsonl and score.json, in subset order."""
+    def collect(self, component, extra=None, stratify=None):
+        """Fold grades/ into grades.jsonl and score.json, in subset order.
+
+        `stratify` (row -> key) is passed to runtime_stats for per-stratum interaction.
+        """
         subset = self.read_subset()
         graded = self.read_grades()
         rows = self.rows_by_id()
@@ -350,7 +400,7 @@ class ResultDir:
             "results_dir": self.path,
             "scored_at": now_stamp(),
         }
-        score.update(self.runtime_stats())
+        score.update(self.runtime_stats(stratify))
         cfg = self.config
         for k in ("endpoint", "model", "mode", "imported"):
             if k in cfg:
@@ -362,9 +412,18 @@ class ResultDir:
 
     # -- runtime -----------------------------------------------------------------
 
-    def runtime_stats(self):
-        """Latency and token totals, so a run reports speed as well as accuracy."""
-        rows = [r for r in self.read_rows() if is_done(r)]
+    def runtime_stats(self, stratify=None):
+        """Latency, token totals and interaction statistics for the run.
+
+        Interaction statistics (median with bootstrap SE, mean, p90, max) cover only the
+        items that produced an answer. Runaways -- rows with no answer because they hit
+        the output limit -- sit at the cap and would swamp the mean, so they are counted
+        separately instead (`no_answer`, `output_limit_rate`). A pooled median cannot see
+        a minority population (BFCL multi-turn, long qa3 lengths), so `stratify`
+        (row -> key) adds the same numbers per stratum under `interaction_by`.
+        """
+        all_rows = self.read_rows()
+        rows = [r for r in all_rows if is_done(r)]
         lat = sorted(r["latency_s"] for r in rows if isinstance(r.get("latency_s"), (int, float)))
         out = {}
         if lat:
@@ -381,14 +440,42 @@ class ResultDir:
             out["prompt_tokens_total"] = prompt_toks
         if completion_toks:
             out["completion_tokens_total"] = completion_toks
-        inter = sorted(t for t in (interaction_tokens(r) for r in rows) if t is not None)
-        if inter:
-            out["interaction_tokens_median"] = statistics.median(inter)
-            out["interaction_tokens_p90"] = inter[min(len(inter) - 1, int(0.9 * len(inter)))]
-            out["interaction_tokens_max"] = inter[-1]
-        rounds = [r["rounds"] for r in rows if isinstance(r.get("rounds"), int)]
+
+        clean = [r for r in all_rows if not r.get("error")]
+        answered = [r for r in clean if is_done(r) and not no_answer_kind(r)]
+        out.update(interaction_summary(answered, clean))
+        if stratify:
+            keys = list(dict.fromkeys(stratify(r) for r in clean))
+            out["interaction_by"] = {
+                str(k): interaction_summary([r for r in answered if stratify(r) == k],
+                                            [r for r in clean if stratify(r) == k])
+                for k in keys}
+
+        rounds = sorted(r["rounds"] for r in answered if isinstance(r.get("rounds"), int))
         if rounds:
             out["rounds_median"] = statistics.median(rounds)
-            out["rounds_max"] = max(rounds)
+            out["rounds_mean"] = round(statistics.mean(rounds), 1)
+            out["rounds_p90"] = rounds[min(len(rounds) - 1, int(0.9 * len(rounds)))]
+            out["rounds_max"] = rounds[-1]
             out["tool_calls_total"] = sum(r.get("tool_calls") or 0 for r in rows)
         return out
+
+
+def interaction_summary(answered, clean):
+    """Interaction stats over `answered` rows; no-answer counts and rate over `clean` rows.
+
+    `clean` is every error-free row; `answered` the subset with a real answer.
+    """
+    out = {}
+    st = token_stats([t for t in (interaction_tokens(r) for r in answered) if t is not None])
+    if st:
+        out["interaction_tokens_median"] = st["median"]
+        out["interaction_tokens_median_se"] = st["median_se"]
+        out["interaction_tokens_mean"] = st["mean"]
+        out["interaction_tokens_p90"] = st["p90"]
+        out["interaction_tokens_max"] = st["max"]
+        out["interaction_tokens_n"] = st["n"]
+    kinds = [no_answer_kind(r) for r in clean]
+    out["no_answer"] = {"output_limit": kinds.count("output_limit"), "empty": kinds.count("empty")}
+    out["output_limit_rate"] = round(kinds.count("output_limit") / len(clean), 4) if clean else 0.0
+    return out

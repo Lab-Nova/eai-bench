@@ -208,21 +208,35 @@ def collect(rd):
         c["total"] += 1
     capped = sum(1 for item in subset
                  if (rows.get(str(item["id"])) or {}).get("finish_reason") == "length")
-    score = rd.collect(COMPONENT, extra={"by_length": by_length, "truncated": capped})
+    score = rd.collect(COMPONENT, extra={"by_length": by_length, "truncated": capped},
+                       stratify=lambda r: r.get("length"))
 
     print(f"\n{'length':>8s} {'correct':>9s} {'acc':>7s}")
     for ln, c in by_length.items():
         print(f"{ln:>8s} {c['correct']:4d}/{c['total']:<4d} {100 * c['correct'] / c['total']:6.1f}%")
     print(f"{'all':>8s} {score['correct']:4d}/{score['total']:<4d} {100 * score['accuracy']:6.1f}%"
           f"   ({score['responded']} answered, {capped} hit max_tokens)")
-    if score.get("interaction_tokens_median") is not None:
-        print(f"interaction tokens (final context - prompt): "
-              f"median {score['interaction_tokens_median']:,.0f}  "
-              f"p90 {score['interaction_tokens_p90']:,}  max {score['interaction_tokens_max']:,}")
+    print_interaction(score)
     if not score["complete"]:
         print(f"WARNING: {score['total'] - score['graded']} item(s) have no answer and count "
               f"as incorrect; resume with run --results-dir {rd.path}", file=sys.stderr)
     return score
+
+
+def print_interaction(score):
+    """Interaction over answered items per length (a pooled median hides the long ones)."""
+    by = score.get("interaction_by") or {}
+    if not by:
+        return
+    print(f"\ninteraction tokens (final context - prompt), answered items only:")
+    print(f"{'length':>8s} {'n':>4s} {'median':>14s} {'mean':>8s} {'p90':>8s} {'cap hits':>9s}")
+    for ln, b in list(by.items()) + [("all", score)]:
+        if b.get("interaction_tokens_median") is None:
+            continue
+        print(f"{ln:>8s} {b['interaction_tokens_n']:4d} "
+              f"{b['interaction_tokens_median']:8,.0f} ± {b['interaction_tokens_median_se']:<5,.0f}"
+              f"{b['interaction_tokens_mean']:8,.0f} {b['interaction_tokens_p90']:8,} "
+              f"{b['no_answer']['output_limit']:9d}")
 
 
 def cmd_collect(a):

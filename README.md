@@ -171,8 +171,8 @@ counted as a spurious incorrect had it not been spotted by hand.
 
 GLM-5.3 BF16 weights with a BF16 KV cache, under sglang on 4 GB300 trays (16 GPUs, TP16),
 October 2026, at the 131,072-token cap. HLE, AA-LCR, Counting-Stars and qa3 sample at
-temperature 0.6 / top_p 0.95 (run of 2026-10-05). BFCL samples at bfcl-eval's own 0.001 and
-is the run of 2026-10-01. Accuracy SE is binomial over the subset, except AA-LCR (over the
+temperature 0.6 / top_p 0.95: AA-LCR and the probes are the runs of 2026-10-05, HLE the run
+of 2026-10-07 at 78b7895. BFCL samples at bfcl-eval's own 0.001 and is the run of 2026-10-01. Accuracy SE is binomial over the subset, except AA-LCR (over the
 100 per-question means of avg@5) and Counting-Stars (over its 30 language x length cells).
 Interaction columns are over answered items only (median ± bootstrap SE, and mean); the
 output-limit column counts the runaways they leave out (see above).
@@ -182,9 +182,9 @@ output-limit column counts the runaways they leave out (see above).
 | BFCL-500 | 374/500 = 74.80 ± 1.94% | 195 ± 7 | 1,631 | n/a |
 | · single-turn (412) | | 160 ± 10 | 260 | |
 | · multi-turn (88) | | 3,864 ± 412 | 8,052 | |
-| HLE-250 with tools | pending | | | |
+| HLE-250 with tools | 135/250 = 54.00 ± 3.15% | 34,474 ± 2,388 | 69,703 | 4/250 |
 | AA-LCR-100 (v1.1), avg@5 | 365/500 = 73.00 ± 3.67% | 1,727 ± 135 | 3,595 | 44/500 = 8.8% |
-| **Composite** | pending (needs HLE) | | | |
+| **Composite** | **67.27** | | | |
 | Counting-Stars (probe), avg@10 | 88.74 ± 1.93% | 1,719 ± 60 | 2,273 | 7/300 = 2.3% |
 | BABILong qa3 (probe) | 201/400 = 50.25 ± 2.50% | 9,884 ± 2,073 | 21,383 | 62/400 = 15.5% |
 | · 0k | 100/100 | 634 ± 60 | 890 | 0/100 |

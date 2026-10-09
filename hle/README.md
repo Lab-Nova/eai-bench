@@ -104,6 +104,20 @@ renders it, the server's prefix cache stopped at each assistant turn instead of 
 the tokens it had just generated. Runs from before then are not comparable on this, and
 resuming one with the current client would mix the two.
 
+Each item's last exchange with the server is saved to `transcripts/<id>.json` in the
+results directory:
+
+- `request` is the request exactly as sent: `messages`, with every assistant turn's
+  reasoning and tool calls and every tool result in full, plus `tools`, `tool_choice` and
+  `max_tokens`. Model and sampling are in `config.json`.
+- `response` is the reply with its reasoning; `finish_reason` and `usage` sit beside it.
+
+For an item that went to the forced final, that exchange is the forced-final request.
+For one whose context filled, it is the rebuilt short conversation. For a request that
+failed every retry, it is that request, with no response. `responses.jsonl` keeps only
+the answer and `tool_trace`, which cuts each call's code and output to 2,000 characters.
+Runs from before October 2026 have no transcripts, and the no-tools mode writes none.
+
 ## The python tool
 
 Model-written code runs unsupervised in a throwaway directory with a hard **8 GB address
@@ -124,7 +138,7 @@ numbers generally include search, a caveat when comparing against them.
 
 ## Files
 
-`main.py` CLI · `dataset.py` subset selection and prompts · `runner.py` the two
+`main.py` CLI and the transcript files · `dataset.py` subset selection and prompts · `runner.py` the two
 generation modes · `ctxgate.py` the context budget over running items · `tools.py`
 the python sandbox · `endpoint.py` async client
 (vendored) · `resultdir.py` results-directory contract (vendored).

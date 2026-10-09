@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dataset  # noqa: E402
 import endpoint as ep  # noqa: E402
 import runner  # noqa: E402
-from resultdir import ResultDir, is_done  # noqa: E402
+from resultdir import ResultDir, is_done, safe_id  # noqa: E402
 
 COMPONENT = "hle"
 RESULTS_BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -44,6 +44,29 @@ HLE_MARKERS = [
     "hle-public", "hle+public", "cais/hle", "centerforaisafety",
     "humanitys-last-exam", "humanity_s_last_exam", "humanity’s last exam",
 ]
+
+
+def transcript_sink(rd, write_row):
+    """Wrap a row sink so each row's transcript goes to transcripts/<id>.json instead.
+
+    A transcript holds the item's whole final conversation, up to a million tokens, so it
+    stays out of responses.jsonl. It is written first, so a row on disk always has its
+    transcript; a rerun of the item replaces it.
+    """
+    tdir = os.path.join(rd.path, "transcripts")
+    os.makedirs(tdir, exist_ok=True)
+
+    def sink(row):
+        transcript = row.pop("transcript", None)
+        if transcript is not None:
+            path = os.path.join(tdir, safe_id(row["id"]) + ".json")
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({"id": row["id"], **transcript}, f, ensure_ascii=False)
+            os.replace(path + ".tmp", path)
+        write_row(row)
+
+    sink.close = write_row.close
+    return sink
 
 
 def cmd_run(a):
@@ -117,7 +140,7 @@ def cmd_run(a):
         def work(it):
             return runner.run_no_tools(client, it, max_tokens=a.max_tokens)
 
-    sink = ep.jsonl_writer(rd.responses_path)
+    sink = transcript_sink(rd, ep.jsonl_writer(rd.responses_path))
     try:
         asyncio.run(ep.drive(todo, work, a.concurrency, sink, label="id"))
     finally:

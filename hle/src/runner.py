@@ -70,6 +70,21 @@ def _assistant_msg(msg):
     return m
 
 
+def _exchange(messages, params, resp=None):
+    """One request as sent and the reply it got, the item's transcript if it is the last.
+
+    `messages` must be the list as sent, not one the loop goes on appending to. Model and
+    sampling are the run's and live in config.json. `response` stays None when the request
+    got no reply (a context overflow, or a failure after every retry).
+    """
+    ex = {"request": {"messages": messages, **params}, "response": None}
+    if resp is not None:
+        choice = resp.choices[0]
+        ex.update(response=_assistant_msg(choice.message),
+                  finish_reason=getattr(choice, "finish_reason", None), usage=_usage(resp))
+    return ex
+
+
 async def _exec_tool(tc):
     pool, fn = hle_tools.dispatch(tc.function.name, tc.function.arguments)
     if pool is None:
@@ -101,13 +116,15 @@ def _digest(trace, limit=60000):
 
 
 async def _force_final(client, item, trace, messages, ctx_full, max_tokens, slot, ctx):
-    """Make the model commit to an answer. Returns (answer, usage, same_conversation).
+    """Make the model commit to an answer.
 
-    While the conversation still fits we just append the instruction to it. Once the
-    context is full that is impossible, so we rebuild a short conversation carrying the
-    question plus a digest of the tool findings. A rebuilt conversation is a different
-    context, so its usage says nothing about how far the item's own context grew.
-    `slot` and `ctx` are the item's context-gate slot and its conversation's size.
+    Returns (answer, usage, same_conversation, exchange), `exchange` being the request and
+    reply for the transcript. While the conversation still fits we just append the
+    instruction to it. Once the context is full that is impossible, so we rebuild a short
+    conversation carrying the question plus a digest of the tool findings. A rebuilt
+    conversation is a different context, so its usage says nothing about how far the
+    item's own context grew. `slot` and `ctx` are the item's context-gate slot and its
+    conversation's size.
     """
     cap = {"max_tokens": max_tokens} if max_tokens else {}
     if not ctx_full:
@@ -116,11 +133,13 @@ async def _force_final(client, item, trace, messages, ctx_full, max_tokens, slot
             "content": "Stop using tools and give your final answer now, in the required "
                        "format, based on what you have already found.",
         }]
+        params = {"tool_choice": "none", **cap}
         await slot.acquire(ctx + ctxgate.estimate_tokens(convo[-1]["content"]))
         for i_try in range(ep.DEFAULT_ATTEMPTS):
             try:
-                r = await client.create(convo, tool_choice="none", **cap)
-                return r.choices[0].message.content or "", _usage(r), True
+                r = await client.create(convo, **params)
+                return (r.choices[0].message.content or "", _usage(r), True,
+                        _exchange(convo, params, r))
             except Exception as e:  # noqa: BLE001 - only overflow is recoverable here
                 if _is_context_overflow(e):
                     break
@@ -141,7 +160,7 @@ async def _force_final(client, item, trace, messages, ctx_full, max_tokens, slot
             if i_try + 1 >= ep.DEFAULT_ATTEMPTS:
                 raise
             await ep.backoff(i_try)
-    return r.choices[0].message.content or "", _usage(r), False
+    return r.choices[0].message.content or "", _usage(r), False, _exchange(convo, cap, r)
 
 
 def _usage(resp):
@@ -170,6 +189,7 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     usages = []  # one per request of this conversation, in order
     spent = rounds = ncalls = 0
     final, trace, err, finish = "", [], None, None
+    last = None  # the latest request and its reply (_exchange)
     forced = ctx_full = budget_hit = False
     try:
         while True:
@@ -190,6 +210,8 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
             # an item that had already spent twenty minutes in its tool loop; a single
             # three-minute 503 window cost 24 items at once.
             await slot.acquire(ctx)
+            sent = list(messages)
+            last = _exchange(sent, kwargs)
             resp = None
             for i_try in range(ep.DEFAULT_ATTEMPTS):
                 try:
@@ -210,7 +232,8 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
                 spent += resp.usage.completion_tokens or 0
             msg = resp.choices[0].message
             finish = getattr(resp.choices[0], "finish_reason", None)
-            messages.append(_assistant_msg(msg))
+            last = _exchange(sent, kwargs, resp)
+            messages.append(last["response"])
             # The next prompt is this one plus the turn just generated, reasoning included.
             u = usages[-1] or {}
             if u.get("prompt_tokens") is not None:
@@ -239,8 +262,8 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
                 budget_hit = True
                 break
         if not final:
-            final, usage, same = await _force_final(client, item, trace, messages, ctx_full,
-                                                    max_tokens, slot, ctx)
+            final, usage, same, last = await _force_final(client, item, trace, messages,
+                                                          ctx_full, max_tokens, slot, ctx)
             forced = True
             if same:
                 usages.append(usage)
@@ -256,12 +279,15 @@ async def run_with_tools(client, item, max_rounds=0, gen_budget=0,
     # finish_reason is the loop's last request's, so an empty answer after a request that
     # ran into max_tokens is marked as an output-limit runaway.
     gated = {"ctx_pause_s": round(slot.wait_s - admitted_wait, 2)} if ctx_gate else {}
+    # `transcript` is the item's last exchange with the server: the request as sent, every
+    # turn's reasoning, tool calls and full tool results included, and the reply. main.py
+    # moves it out of the row into transcripts/<id>.json.
     return ep.finish_row(row, t0, response=final, completion_tokens=spent, rounds=rounds,
                          finish_reason=finish, max_tokens=max_tokens or None,
                          tool_calls=ncalls, tool_trace=trace, forced_final=forced,
                          tool_budget_hit=budget_hit, context_full=ctx_full, prompt_tokens=prompt_tokens,
                          final_context_tokens=final_ctx, interaction_tokens=interaction,
-                         error=err, **gated)
+                         error=err, transcript=last, **gated)
 
 
 async def run_no_tools(client, item, max_tokens=DEFAULT_MAX_TOKENS, attempts=3):

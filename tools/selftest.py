@@ -19,7 +19,7 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "hle", "src"))
 
-from resultdir import ResultDir, is_done  # noqa: E402
+from resultdir import ResultDir, is_done, safe_id  # noqa: E402
 
 PASS, FAIL = "  ok  ", "  FAIL"
 failures = []
@@ -394,6 +394,42 @@ def test_interaction(tmp):
     check("hle: reasoning goes back under the field the server returned it in",
           sent_back("reasoning").get("reasoning") == "plan 1"
           and "reasoning_content" not in sent_back("reasoning"))
+
+    thinker = Thinker("reasoning_content")
+    t = asyncio.run(runner.run_with_tools(thinker, {"id": "v", "prompt": "q"})).get("transcript") or {}
+    req = t.get("request") or {}
+    check("hle: the transcript is the last request exactly as the server received it",
+          req.get("messages") == thinker.convos[-1] and req.get("tool_choice") == "auto"
+          and req.get("max_tokens") == 131072 and req.get("tools") == runner.hle_tools.TOOLS, f"got {t}")
+    check("hle: the transcript keeps earlier reasoning, tool calls and tool results",
+          [m["role"] for m in req.get("messages", [])] == ["user", "assistant", "tool"]
+          and req["messages"][1].get("reasoning_content") == "plan 1"
+          and req["messages"][1]["tool_calls"][0]["id"] == "t1", f"got {req}")
+    check("hle: the transcript carries the reply with its reasoning",
+          t.get("response") == {"role": "assistant", "content": "42", "reasoning_content": "plan 2"}
+          and t.get("usage") == {"prompt_tokens": 20, "completion_tokens": 5}, f"got {t}")
+    row = asyncio.run(runner.run_with_tools(Greedy(), {"id": "y", "prompt": "q"}, max_tool_calls=3))
+    t = row.get("transcript") or {}
+    check("hle: a forced final's transcript is the forced-final request and its answer",
+          t["request"]["tool_choice"] == "none" and "tools" not in t["request"]
+          and t["request"]["messages"][-1]["content"].startswith("Stop using tools")
+          and t["response"]["content"] == "7", f"got {t}")
+
+    from importlib.util import module_from_spec, spec_from_file_location
+    spec = spec_from_file_location("hle_main", os.path.join(REPO, "hle", "src", "main.py"))
+    hm = module_from_spec(spec)
+    spec.loader.exec_module(hm)
+    rd = ResultDir.start(tmp, suffix="transcripts")
+    written = []
+
+    def write_row(r):
+        written.append(r)
+    write_row.close = lambda: None
+    hm.transcript_sink(rd, write_row)({"id": "a/b", "response": "42", "transcript": {"request": {}}})
+    path = os.path.join(rd.path, "transcripts", safe_id("a/b") + ".json")
+    check("hle: the sink writes the transcript to its own file and not into the row",
+          written == [{"id": "a/b", "response": "42"}] and os.path.exists(path)
+          and json.load(open(path)) == {"id": "a/b", "request": {}}, f"got {written}")
 
     sys.path.insert(0, os.path.join(REPO, "bfcl", "src"))
     try:
